@@ -92,44 +92,58 @@ if (-not (Test-Path (Join-Path $SunshineSrc "CMakeLists.txt"))) {
     throw "Vendored engines missing. git submodule update --init --recursive (do not checkout Moonlight v6.1.0)"
 }
 
-function Apply-SunshinePatches {
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string[]]$GitArgs,
+        [switch]$Quiet
+    )
+    # git writes "error:" / "warning:" to stderr even for expected --check misses.
+    # With $ErrorActionPreference Stop that becomes a terminating NativeCommandError.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($Quiet) {
+            & git -C $Repo @GitArgs *> $null
+        } else {
+            & git -C $Repo @GitArgs
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Apply-SidecarPatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$Filter
+    )
     $patchDir = Join-Path $Root "patches"
-    $patches = @(Get-ChildItem $patchDir -Filter "sunshine-*.patch" -ErrorAction SilentlyContinue | Sort-Object Name)
+    $patches = @(Get-ChildItem $patchDir -Filter $Filter -ErrorAction SilentlyContinue | Sort-Object Name)
     if ($patches.Count -eq 0) {
-        throw "No patches/sunshine-*.patch files found"
+        throw "No patches/$Filter files found"
     }
     foreach ($patch in $patches) {
-        git -C $SunshineSrc apply --reverse --check $patch.FullName 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        $already = Invoke-Git -Repo $Repo -GitArgs @("apply", "--reverse", "--check", $patch.FullName) -Quiet
+        if ($already -eq 0) {
             Write-Host "Already applied $($patch.Name)"
             continue
         }
         Write-Host "==> Applying $($patch.Name)"
-        git -C $SunshineSrc apply --whitespace=nowarn $patch.FullName
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "git apply failed for $($patch.Name) (exit $LASTEXITCODE)"
+        $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName)
+        if ($applied -ne 0) {
+            throw "git apply failed for $($patch.Name) (exit $applied)"
         }
     }
 }
 
+function Apply-SunshinePatches {
+    Apply-SidecarPatches -Repo $SunshineSrc -Filter "sunshine-*.patch"
+}
+
 function Apply-MoonlightPatches {
-    $patchDir = Join-Path $Root "patches"
-    $patches = @(Get-ChildItem $patchDir -Filter "moonlight-*.patch" -ErrorAction SilentlyContinue | Sort-Object Name)
-    if ($patches.Count -eq 0) {
-        throw "No patches/moonlight-*.patch files found"
-    }
-    foreach ($patch in $patches) {
-        git -C $MoonlightSrc apply --reverse --check $patch.FullName 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Already applied $($patch.Name)"
-            continue
-        }
-        Write-Host "==> Applying $($patch.Name)"
-        git -C $MoonlightSrc apply --whitespace=nowarn $patch.FullName
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "git apply failed for $($patch.Name) (exit $LASTEXITCODE)"
-        }
-    }
+    Apply-SidecarPatches -Repo $MoonlightSrc -Filter "moonlight-*.patch"
 }
 
 Apply-SunshinePatches
