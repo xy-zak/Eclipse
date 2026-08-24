@@ -16,12 +16,74 @@ function Require-Cmd($name) {
     }
 }
 
+function Deploy-MoonlightRuntime {
+    param([Parameter(Mandatory = $true)][string]$MoonlightExe)
+
+    $deploy = Join-Path $Root "src-tauri\resources\moonlight-runtime"
+    New-Item -ItemType Directory -Force -Path $deploy | Out-Null
+    Get-ChildItem $deploy -Force | Where-Object { $_.Name -ne ".gitkeep" } | Remove-Item -Recurse -Force
+
+    $libDir = Join-Path $MoonlightSrc "libs\windows\lib\x64"
+    if (-not (Test-Path (Join-Path $libDir "SDL2.dll"))) {
+        throw "Moonlight x64 DLLs missing at $libDir"
+    }
+    Copy-Item (Join-Path $libDir "*.dll") $deploy -Force
+
+    $anti = Join-Path $BuildMoon "AntiHooking\release\AntiHooking.dll"
+    if (-not (Test-Path $anti)) {
+        $anti = Get-ChildItem -Path $BuildMoon -Recurse -Filter "AntiHooking.dll" |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $anti -or -not (Test-Path $anti)) {
+        throw "AntiHooking.dll not found under $BuildMoon"
+    }
+    Copy-Item $anti $deploy -Force
+
+    $gameDb = Join-Path $MoonlightSrc "app\SDL_GameControllerDB\gamecontrollerdb.txt"
+    if (Test-Path $gameDb) {
+        Copy-Item $gameDb $deploy -Force
+    }
+
+    $qtBin = Split-Path $qmake.Source
+    $windeployqt = Join-Path $qtBin "windeployqt.exe"
+    if (-not (Test-Path $windeployqt)) {
+        throw "windeployqt.exe missing next to qmake at $qtBin"
+    }
+
+    $qmlDir = Join-Path $MoonlightSrc "app\gui"
+    & $windeployqt --dir $deploy --release --qmldir $qmlDir --no-opengl-sw --no-compiler-runtime --no-sql --no-system-d3d-compiler --no-system-dxc-compiler --skip-plugin-types qmltooling,generic --no-ffmpeg --no-quickcontrols2fusion --no-quickcontrols2imagine --no-quickcontrols2universal $MoonlightExe
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        Write-Host "windeployqt extra flags failed; retrying with a smaller flag set"
+        & $windeployqt --dir $deploy --release --qmldir $qmlDir --no-opengl-sw --no-compiler-runtime --no-sql $MoonlightExe
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "windeployqt failed (exit $LASTEXITCODE)"
+        }
+    }
+
+    $icu = Join-Path $deploy "icuuc.dll"
+    if (Test-Path $icu) {
+        Remove-Item $icu -Force
+    }
+}
+
 Require-Cmd rustc
 Require-Cmd cmake
 Require-Cmd git
 $qmake = Get-Command qmake -ErrorAction SilentlyContinue
 if (-not $qmake) { $qmake = Get-Command qmake6 -ErrorAction SilentlyContinue }
 if (-not $qmake) { throw "Missing qmake/qmake6 (Qt 6). Run scripts/bootstrap.ps1" }
+
+if ($env:ECLIPSE_SIDECAR -eq "moonlight-runtime") {
+    $moonBin = Get-ChildItem -Path $BuildMoon, $MoonlightSrc -Recurse -Filter "Moonlight.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $moonBin) {
+        throw "Moonlight.exe not found. Build Moonlight first."
+    }
+    Write-Host "==> Deploying Moonlight Windows runtime (Qt/SDL/FFmpeg)"
+    Deploy-MoonlightRuntime -MoonlightExe $moonBin.FullName
+    Write-Host "Moonlight runtime staged at src-tauri/resources/moonlight-runtime"
+    exit 0
+}
 
 if (-not (Test-Path (Join-Path $SunshineSrc "CMakeLists.txt"))) {
     git -C $Root submodule update --init --recursive
@@ -117,6 +179,9 @@ if (-not $moonBin) {
 }
 if (-not $moonBin) { throw "Moonlight.exe not found" }
 Copy-Item $moonBin.FullName (Join-Path $BinDir "moonlight-$Triple.exe") -Force
+
+Write-Host "==> Deploying Moonlight Windows runtime (Qt/SDL/FFmpeg)"
+Deploy-MoonlightRuntime -MoonlightExe $moonBin.FullName
 
 Write-Host "Sidecars copied to $BinDir"
 Get-ChildItem $BinDir

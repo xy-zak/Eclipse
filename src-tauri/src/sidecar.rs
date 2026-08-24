@@ -13,6 +13,9 @@ use std::time::Duration;
 /// `/apps.json` in C++; it does not read `SUNSHINE_ASSETS_DIR` from the environment.
 const SUNSHINE_SHARE_REL: &str = "share/sunshine";
 
+/// Windows Moonlight Qt/SDL/FFmpeg files produced by `scripts/build-sidecars.ps1`.
+const MOONLIGHT_RUNTIME_REL: &str = "resources/moonlight-runtime";
+
 /// Contract for a vendored GameStream engine. Engine upgrades should only
 /// require changing these constants (plus the build script), not the UI.
 #[derive(Clone, Copy, Debug)]
@@ -220,6 +223,14 @@ impl Engine {
                     }
                 }
             }
+            if cfg!(windows) && self.name == MOONLIGHT.name {
+                let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MOONLIGHT_RUNTIME_REL);
+                if runtime.is_dir() {
+                    if let Err(err) = stage_moonlight_runtime(parent, &runtime) {
+                        eprintln!("Eclipse: could not stage Moonlight runtime ({err})");
+                    }
+                }
+            }
             cmd.current_dir(parent);
         }
         Ok(cmd)
@@ -282,6 +293,28 @@ fn stage_sunshine_share(bin_dir: &Path, assets: &Path) -> std::io::Result<PathBu
     }
     copy_dir_all(assets, &dest)?;
     Ok(dest)
+}
+
+fn moonlight_runtime_ready(bin_dir: &Path) -> bool {
+    bin_dir.join("Qt6Core.dll").is_file()
+        && bin_dir.join("platforms").join("qwindows.dll").is_file()
+}
+
+/// Copy Windows Moonlight Qt/SDL/FFmpeg runtime files beside the sidecar binary.
+///
+/// `moonlight.exe` is dynamically linked. Without these files it exits immediately
+/// (`STATUS_DLL_NOT_FOUND`) and Connect reports a PIN timeout.
+fn stage_moonlight_runtime(bin_dir: &Path, runtime: &Path) -> std::io::Result<()> {
+    if !runtime.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Moonlight runtime directory is missing",
+        ));
+    }
+    if paths_same(runtime, bin_dir) || moonlight_runtime_ready(bin_dir) {
+        return Ok(());
+    }
+    copy_dir_all(runtime, bin_dir)
 }
 
 fn child_alive(child: Option<&mut Child>) -> bool {
@@ -492,6 +525,52 @@ mod tests {
         let staged = stage_sunshine_share(root.as_path(), &dest).unwrap();
         assert_eq!(staged, dest);
         assert_eq!(std::fs::read_to_string(dest.join("apps.json")).unwrap(), "keep");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_moonlight_runtime_copies_qt_loader_files() {
+        let root = unique_temp("eclipse-moon-runtime");
+        let runtime = root.join("runtime");
+        let bin_dir = root.join("debug");
+        std::fs::create_dir_all(runtime.join("platforms")).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(runtime.join("Qt6Core.dll"), "qt").unwrap();
+        std::fs::write(runtime.join("platforms").join("qwindows.dll"), "plugin").unwrap();
+        stage_moonlight_runtime(&bin_dir, &runtime).unwrap();
+        assert!(moonlight_runtime_ready(&bin_dir));
+        assert_eq!(
+            std::fs::read_to_string(bin_dir.join("Qt6Core.dll")).unwrap(),
+            "qt"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_moonlight_runtime_skips_when_already_ready() {
+        let root = unique_temp("eclipse-moon-ready");
+        let runtime = root.join("runtime");
+        let bin_dir = root.join("debug");
+        std::fs::create_dir_all(runtime.join("platforms")).unwrap();
+        std::fs::create_dir_all(bin_dir.join("platforms")).unwrap();
+        std::fs::write(runtime.join("Qt6Core.dll"), "new").unwrap();
+        std::fs::write(runtime.join("platforms").join("qwindows.dll"), "new").unwrap();
+        std::fs::write(bin_dir.join("Qt6Core.dll"), "old").unwrap();
+        std::fs::write(bin_dir.join("platforms").join("qwindows.dll"), "old").unwrap();
+        stage_moonlight_runtime(&bin_dir, &runtime).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bin_dir.join("Qt6Core.dll")).unwrap(),
+            "old"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_moonlight_runtime_errors_when_runtime_missing() {
+        let root = unique_temp("eclipse-moon-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = stage_moonlight_runtime(&root, &root.join("missing")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(&root);
     }
 

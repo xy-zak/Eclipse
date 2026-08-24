@@ -137,6 +137,7 @@ This compiles Sunshine (CMake + Ninja, CUDA auto) and Moonlight (`qmake6` + `mak
 src-tauri/binaries/sunshine-<rust-host-triple>      # .exe on Windows
 src-tauri/binaries/moonlight-<rust-host-triple>
 src-tauri/resources/sunshine/                       # web UI, shaders, assets
+src-tauri/resources/moonlight-runtime/              # Windows Qt/SDL/FFmpeg (gitignored; from windeployqt)
 ```
 
 Example Linux triple: `x86_64-unknown-linux-gnu`. Tauri `externalBin` is `binaries/sunshine` and `binaries/moonlight`; the build system appends the triple. `cargo` / `tauri dev` fail with a missing-file error until these exist.
@@ -175,6 +176,7 @@ Eclipse/
     binaries/                   # gitignored sidecars
     resources/sunshine/         # copied Sunshine assets
     resources/sunshine-prefix/  # gitignored cmake prefix
+    resources/moonlight-runtime/ # Windows Moonlight Qt runtime (gitignored)
     src/
       lib.rs                    # Tauri setup; sidecar_status, list_peers, connect
       sidecar.rs                # Engine adapter (resolve / spawn / health / --creds)
@@ -187,7 +189,7 @@ Eclipse/
   vendor/moonlight-qt/          # submodule
 ```
 
-Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream <ip> Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
+Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream --1080 --video-codec H.264 … Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. On Windows, Connect also copies `resources/moonlight-runtime` beside `moonlight.exe` so Qt/SDL/FFmpeg DLLs load. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
 
 Adapter unit tests: `cd src-tauri && cargo test --lib`
 
@@ -217,9 +219,12 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | `MISSING nmake (VsDevCmd)` after VS is installed | `windows-dev-env.ps1` must not reset PATH after importing VsDevCmd. Open a new PowerShell and re-run `.\scripts\setup-windows.ps1`. |
 | Port 47990 in use | Another Eclipse/Sunshine still running. Close the previous window. |
 | Windows `https://localhost:47990` empty / `netstat` has no 47990 | Sunshine exited on first start because `share/sunshine/apps.json` was missing beside the exe. Restart Eclipse after a sidecar rebuild so `sidecar.rs` stages that layout. |
+| Windows Connect: PIN timeout / Moonlight never appears | `moonlight.exe` needs Qt/SDL/FFmpeg DLLs next to it. Re-run `.\scripts\build-sidecars.ps1` so `windeployqt` fills `src-tauri/resources/moonlight-runtime/`. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
 | Connect hangs then errors on PIN | Host Eclipse/Sunshine must be running; Moonlight pair must reach GameStream ports over Tailscale. |
+| Windows Connect PIN timeout while Linux→Windows works | Moonlight never started (missing Qt/SDL DLLs). Re-run `.\scripts\build-sidecars.ps1` and restart Eclipse. |
+| Moonlight “No video received” / UDP 47998 | Logs show audio + successful UDP tests: not a firewall hole. Windows clients otherwise request 4K HEVC; Linux VAAPI often sends no video. Connect now forces 1080p H.264. |
 
 ---
 

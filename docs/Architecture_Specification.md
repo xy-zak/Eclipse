@@ -50,7 +50,7 @@ Until installers exist, "install" means cloning this repository and compiling th
 * **Host Streaming Engine (Bundled Sidecar):** Sunshine (C++)
 * **Client Viewing Engine (Bundled Sidecar):** Moonlight-Qt (C/C++). Moonlight-Core via FFI is a v2 option (section 9), not the current engine.
 * **Network Transport & Identity:** Tailscale (WireGuard) — OS install is a user prerequisite, not bundled. Discovery (`tailscale status --json` + TCP `:47990`) is implemented; streaming over the tailnet is planned.
-* **Streaming Protocol:** Nvidia GameStream (RTSP for handshake, custom UDP for AV/Input)
+* **Streaming Protocol:** Nvidia GameStream (RTSP for handshake, custom UDP for AV/Input). Connect launches Moonlight at 1080p H.264 so Linux VAAPI hosts can emit video; a 4K HEVC request from a Windows client often yields audio-only then a false UDP 47998 error.
 
 ---
 
@@ -147,7 +147,7 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
 * **Startup (implemented):** When Tauri boots, Rust resolves the Sunshine binary (file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`). It copies vendored assets to `{exe_dir}/share/sunshine` (the compile-time Windows assets path) and spawns Sunshine with cwd next to the binary. Failure does not abort the UI.
 * **Shutdown (implemented):** On `RunEvent::Exit`, Rust kills the Sunshine child.
 * **API Control (planned):** Tauri communicates with the local Sunshine instance via its REST API (`https://localhost:47990`) to configure resolution limits, framerates, and encoder preferences based on the user's settings in the React UI.
-* **Client Spawning (implemented):** When a connection is requested, Tauri spawns the Moonlight sidecar as `moonlight stream <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop.
+* **Client Spawning (implemented):** When a connection is requested, Tauri spawns the Moonlight sidecar as `moonlight stream --1080 --video-codec H.264 --no-hdr --packet-size 1024 <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop. On Windows, Eclipse copies `resources/moonlight-runtime` (Qt/SDL/FFmpeg from `windeployqt`) beside `moonlight.exe` before spawn.
 
 ---
 
@@ -164,7 +164,7 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
    * Tauri `POST`s `https://{ip}:47990/api/pin` with JSON `{"pin":"NNNN","name":"Eclipse"}` (Sunshine's field is `name`).
    * TLS accepts Sunshine's self-signed certificate. CSRF is skipped (no `Origin`/`Referer`).
    * Basic Auth is `eclipse`:`eclipse`. The POST is retried until Sunshine reports `status: true` (the handshake must already be open).
-5. **Launch Stream:** Tauri executes `moonlight stream <ip> Desktop`. Moonlight connects without a PIN screen.
+5. **Launch Stream:** Tauri executes `moonlight stream --1080 --video-codec H.264 --no-hdr --packet-size 1024 <ip> Desktop`. Moonlight connects without a PIN screen.
 
 ```mermaid
 sequenceDiagram
@@ -188,7 +188,7 @@ sequenceDiagram
     end
     Session->>Moon: kill pair
   end
-  Session->>Moon: stream peerIp Desktop
+  Session->>Moon: stream --1080 H.264 peerIp Desktop
   Moon-->>User: remote desktop
 ```
 
@@ -209,6 +209,7 @@ sequenceDiagram
 * `/src-tauri/binaries`: Target-specific sidecars (gitignored), e.g. `sunshine-x86_64-unknown-linux-gnu`.
 * `/src-tauri/resources/sunshine`: Copied Sunshine web/shader assets.
 * `/src-tauri/resources/sunshine-prefix`: Local CMake install prefix (gitignored).
+* `/src-tauri/resources/moonlight-runtime`: Windows Moonlight Qt/SDL/FFmpeg runtime (gitignored; produced by `windeployqt`).
 
 * `/vendor/sunshine`, `/vendor/moonlight-qt`: Git submodules pinned in `vendor/PINS`.
 

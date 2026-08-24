@@ -32,7 +32,7 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/sunshine", "binaries/moonlight"],
-    "resources": ["resources/sunshine"],
+    "resources": ["resources/sunshine", "resources/moonlight-runtime"],
     "linux": {
       "deb": {
         "depends": [

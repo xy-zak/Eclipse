@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::sidecar::{SUNSHINE, SUNSHINE_UI_PASS, SUNSHINE_UI_USER};
 
-const PIN_RETRY: Duration = Duration::from_secs(15);
+const PIN_RETRY: Duration = Duration::from_secs(25);
 const PIN_INTERVAL: Duration = Duration::from_millis(300);
 const PIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 

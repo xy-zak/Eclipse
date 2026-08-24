@@ -32,3 +32,5 @@ src-tauri/binaries/*
 src-tauri/resources/sunshine/*
 !src-tauri/resources/sunshine/.gitkeep
 src-tauri/resources/sunshine-prefix/
+src-tauri/resources/moonlight-runtime/*
+!src-tauri/resources/moonlight-runtime/.gitkeep

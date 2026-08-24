@@ -13,6 +13,7 @@ use crate::sidecar::MOONLIGHT;
 
 const DESKTOP_APP: &str = "Desktop";
 const POST_PIN_SETTLE: Duration = Duration::from_secs(3);
+const PAIR_START_GRACE: Duration = Duration::from_millis(400);
 
 pub fn list_args(peer_ip: &str) -> Vec<String> {
     vec!["list".into(), peer_ip.into()]
@@ -28,7 +29,20 @@ pub fn pair_args(peer_ip: &str, pin: &str) -> Vec<String> {
 }
 
 pub fn stream_args(peer_ip: &str) -> Vec<String> {
-    vec!["stream".into(), peer_ip.into(), DESKTOP_APP.into()]
+    // Windows Moonlight otherwise uses the local monitor (often 4K HEVC). Linux
+    // VAAPI hosts frequently encode audio but never emit video at that size, which
+    // Moonlight reports as a UDP 47998 timeout even when the path is open.
+    vec![
+        "stream".into(),
+        "--1080".into(),
+        "--video-codec".into(),
+        "H.264".into(),
+        "--no-hdr".into(),
+        "--packet-size".into(),
+        "1024".into(),
+        peer_ip.into(),
+        DESKTOP_APP.into(),
+    ]
 }
 
 pub fn already_paired(text: &str) -> bool {
@@ -105,6 +119,15 @@ impl SessionProcess {
             .map_err(|err| format!("Failed to start Moonlight pair: {err}"))?;
         *self.pair.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
 
+        thread::sleep(PAIR_START_GRACE);
+        if !self.pair_still_running() {
+            self.kill_pair();
+            return Err(
+                "Moonlight pair failed to start. On Windows, rebuild sidecars so Qt/SDL/FFmpeg DLLs sit next to moonlight.exe."
+                    .into(),
+            );
+        }
+
         let pin_result = pairing::submit_pin_until_accepted(ip, &pin, pairing::client_name());
         if let Err(err) = pin_result {
             self.kill_pair();
@@ -119,6 +142,14 @@ impl SessionProcess {
     fn kill_pair(&self) {
         let pair = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take();
         kill_child(pair);
+    }
+
+    fn pair_still_running(&self) -> bool {
+        let mut slot = self.pair.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 }
 
@@ -140,7 +171,17 @@ mod tests {
         );
         assert_eq!(
             stream_args("100.64.0.1"),
-            ["stream", "100.64.0.1", "Desktop"]
+            [
+                "stream",
+                "--1080",
+                "--video-codec",
+                "H.264",
+                "--no-hdr",
+                "--packet-size",
+                "1024",
+                "100.64.0.1",
+                "Desktop"
+            ]
         );
     }
 
@@ -148,5 +189,11 @@ mod tests {
     fn already_paired_detects_moonlight_message() {
         assert!(already_paired("Work-PC is already paired"));
         assert!(!already_paired("Failed to connect"));
+    }
+
+    #[test]
+    fn pair_still_running_is_false_without_child() {
+        let session = SessionProcess::new();
+        assert!(!session.pair_still_running());
     }
 }
