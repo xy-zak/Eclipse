@@ -224,7 +224,7 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
 | Connect hangs then errors on PIN | Host Eclipse/Sunshine must be running; Moonlight pair must reach GameStream ports over Tailscale. |
 | Windows Connect PIN timeout while Linux→Windows works | Moonlight never started (missing Qt/SDL DLLs). Re-run `.\scripts\build-sidecars.ps1` and restart Eclipse. |
-| Moonlight “No video received” / UDP 47998 | Logs show audio + successful UDP tests: not a firewall hole. Windows clients otherwise request 4K HEVC; Linux VAAPI often sends no video. Connect now forces 1080p H.264. |
+| Moonlight “No video received” / UDP 47998 | Logs show audio + successful UDP tests: not a firewall hole. Check the host Sunshine log for `Couldn't bind RTSP server to port [48010]`; a leftover Sunshine owns the stream. |
 
 ---
 

@@ -42,6 +42,21 @@ pub fn pin_url(host: &str) -> String {
     format!("https://{host}:{port}/api/pin")
 }
 
+pub fn logs_url(host: &str) -> String {
+    let port = SUNSHINE.health().map(|h| h.port).unwrap_or(47990);
+    format!("https://{host}:{port}/api/logs")
+}
+
+/// True when the most recent Sunshine process logged that RTSP 48010 was taken.
+/// Pairing can still work on :47990 while Moonlight streams to a leftover host on :48010.
+pub fn host_rtsp_bind_failed(log: &str) -> bool {
+    let slice = log
+        .rfind("Sunshine version:")
+        .map(|i| &log[i..])
+        .unwrap_or(log);
+    slice.contains("Couldn't bind RTSP server to port")
+}
+
 pub fn pin_payload(pin: &str, name: &str) -> serde_json::Value {
     serde_json::json!({ "pin": pin, "name": name })
 }
@@ -128,6 +143,32 @@ pub fn submit_pin_until_accepted(host: &str, pin: &str, name: &str) -> Result<()
     retry_until_ok(|| submit_pin(host, pin, name), PIN_RETRY, PIN_INTERVAL)
 }
 
+/// GET `/api/logs` and fail Connect when the host Sunshine never bound RTSP.
+pub fn ensure_host_rtsp(host: &str) -> Result<(), PinError> {
+    let client = http_client()?;
+    let response = client
+        .get(logs_url(host))
+        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
+        .send()
+        .map_err(|err| PinError::Other(format!("Host log fetch failed: {err}")))?;
+    let status = response.status();
+    if status.as_u16() == 401 {
+        return Err(PinError::Unauthorized);
+    }
+    if !status.is_success() {
+        return Ok(());
+    }
+    let text = response
+        .text()
+        .map_err(|err| PinError::Other(format!("Host log fetch was not text: {err}")))?;
+    if host_rtsp_bind_failed(&text) {
+        return Err(PinError::Other(
+            "Host Sunshine could not bind RTSP port 48010 (already in use). On that PC, stop extra Sunshine processes (distro package or leftover Eclipse) and restart Eclipse.".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +177,24 @@ mod tests {
     fn pin_url_uses_peer_host_and_sunshine_port() {
         assert_eq!(pin_url("100.64.0.2"), "https://100.64.0.2:47990/api/pin");
         assert_eq!(pin_url("127.0.0.1"), "https://127.0.0.1:47990/api/pin");
+        assert_eq!(logs_url("100.64.0.2"), "https://100.64.0.2:47990/api/logs");
+    }
+
+    #[test]
+    fn host_rtsp_bind_failed_uses_latest_sunshine_instance() {
+        let log = "\
+Sunshine version: old
+Couldn't bind RTSP server to port [48010], Address already in use
+Sunshine version: new
+Info: Found H.264 encoder: h264_vaapi [vaapi]
+";
+        assert!(!host_rtsp_bind_failed(log));
+        let log = "\
+Sunshine version: 0.0.0
+Info: Found H.264 encoder: h264_vaapi [vaapi]
+Fatal: Couldn't bind RTSP server to port [48010], Address already in use
+";
+        assert!(host_rtsp_bind_failed(log));
     }
 
     #[test]

@@ -105,6 +105,8 @@ impl SessionProcess {
             self.pair_host(ip)?;
         }
 
+        pairing::ensure_host_rtsp(ip).map_err(|err| err.into_message())?;
+
         let child = MOONLIGHT
             .spawn_args(&stream_args(ip))
             .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;

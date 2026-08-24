@@ -157,8 +157,9 @@ This section is the intended user path. It is not available yet.
 | Peers says Tailscale is not installed / not running | Install Tailscale and run `tailscale up`. Eclipse does not log you in. |
 | Peer is on the tailnet but “No Sunshine” | The other PC is not running Eclipse, or Sunshine is not listening on `:47990`. On Windows, confirm `https://localhost:47990` loads on the host; if it does not, restart Eclipse so the sidecar can stage `share/sunshine` and stay up. Windows Firewall may still block inbound GameStream ports on the Tailscale adapter. |
 | Connect says PIN was not accepted before timeout | On Windows, Moonlight needs Qt/SDL/FFmpeg DLLs next to it — rebuild sidecars and restart Eclipse. On either OS, the host PC must be running Eclipse and GameStream ports must be reachable over Tailscale. |
-| Moonlight: “No video received from host” / UDP 47998, 48000 | If audio worked, UDP is fine. Eclipse Connect now asks for 1080p H.264; restart Eclipse and Connect again. On Linux, remove the extra ufw rules with `sudo ufw delete allow 47984:47990/tcp`, `sudo ufw delete allow 48010/tcp`, and `sudo ufw delete allow 47998:48010/udp`. |
+| Moonlight: “No video received from host” / UDP 47998, 48000 | Official Moonlight wiki black-screen steps are for NVIDIA GameStream. If audio arrived, UDP is open. On Linux this is often a second Sunshine holding RTSP `48010` while Eclipse owns `47990`. On the host: `ss -tlnp \| grep 48010`, stop distro Sunshine / extra Eclipse, restart Eclipse, then Connect again. |
+| Two copies of Sunshine | Uninstall distro Sunshine / close the other Eclipse window. GameStream RTSP is port `48010`; the Web UI is `47990`. Both must be the same process. |
 | Connect says the host uses a custom Web UI password | That PC set a Sunshine password other than `eclipse` / `eclipse`. Eclipse does not prompt for it this version. |
 | Connect opens Moonlight but input does not work (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |
 | Video works, input does not (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |
-| Two copies of Sunshine | Uninstall distro Sunshine / close the other Eclipse window. |
+
