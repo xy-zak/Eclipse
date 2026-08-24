@@ -1,0 +1,445 @@
+diff --git c/app/cli/startstream.cpp i/app/cli/startstream.cpp
+index 5f79b555..1eef7966 100644
+--- c/app/cli/startstream.cpp
++++ i/app/cli/startstream.cpp
+@@ -82,6 +82,10 @@ public:
+                 if (event.computer->pairState == NvComputer::PS_PAIRED) {
+                     m_State = StateSeekApp;
+                     m_Computer = event.computer;
++                    if (!event.computer->name.isEmpty()) {
++                        m_DisplayName = event.computer->name;
++                        emit q->computerNameChanged();
++                    }
+                     m_TimeoutTimer->start(APP_SEEK_TIMEOUT);
+                     emit q->searchingApp();
+                 } else {
+@@ -172,6 +176,7 @@ public:
+ 
+     Launcher *q_ptr;
+     QString m_ComputerName;
++    QString m_DisplayName;
+     QString m_AppName;
+     StreamingPreferences *m_Preferences;
+     ComputerManager *m_ComputerManager;
+@@ -222,6 +227,15 @@ bool Launcher::isExecuted() const
+     return d->m_State != StateInit;
+ }
+ 
++QString Launcher::computerName() const
++{
++    Q_D(const Launcher);
++    if (!d->m_DisplayName.isEmpty()) {
++        return d->m_DisplayName;
++    }
++    return d->m_ComputerName;
++}
++
+ void Launcher::onComputerFound(NvComputer *computer)
+ {
+     Q_D(Launcher);
+diff --git c/app/cli/startstream.h i/app/cli/startstream.h
+index 0927cda1..3fb10628 100644
+--- c/app/cli/startstream.h
++++ i/app/cli/startstream.h
+@@ -18,6 +18,7 @@ class Launcher : public QObject
+ {
+     Q_OBJECT
+     Q_DECLARE_PRIVATE_D(m_DPtr, Launcher)
++    Q_PROPERTY(QString computerName READ computerName NOTIFY computerNameChanged)
+ 
+ public:
+     explicit Launcher(QString computer, QString app,
+@@ -27,6 +28,7 @@ public:
+     Q_INVOKABLE void execute(ComputerManager *manager);
+     Q_INVOKABLE void quitRunningApp();
+     Q_INVOKABLE bool isExecuted() const;
++    QString computerName() const;
+ 
+ signals:
+     void searchingComputer();
+@@ -34,6 +36,7 @@ signals:
+     void sessionCreated(QString appName, Session *session);
+     void failed(QString text);
+     void appQuitRequired(QString appName);
++    void computerNameChanged();
+ 
+ private slots:
+     void onComputerFound(NvComputer *computer);
+diff --git c/app/gui/CliStartStreamSegue.qml i/app/gui/CliStartStreamSegue.qml
+index cc1be12a..60008c66 100644
+--- c/app/gui/CliStartStreamSegue.qml
++++ i/app/gui/CliStartStreamSegue.qml
+@@ -4,12 +4,14 @@ import QtQuick.Controls 2.2
+ import ComputerManager 1.0
+ 
+ Item {
++    property string hostName: launcher.computerName
++
+     function onSearchingComputer() {
+-        stageLabel.text = qsTr("Establishing connection to PC...")
++        hostName = launcher.computerName
+     }
+ 
+     function onSearchingApp() {
+-        stageLabel.text = qsTr("Loading app list...")
++        hostName = launcher.computerName
+     }
+ 
+     function onSessionCreated(appName, session) {
+@@ -17,7 +19,8 @@ Item {
+         var segue = component.createObject(stackView, {
+             "appName": appName,
+             "session": session,
+-            "quitAfter": true
++            "quitAfter": true,
++            "hostName": launcher.computerName
+         })
+         stackView.push(segue)
+     }
+@@ -42,27 +45,14 @@ Item {
+             launcher.sessionCreated.connect(onSessionCreated)
+             launcher.failed.connect(onLaunchFailed)
+             launcher.appQuitRequired.connect(onAppQuitRequired)
++            launcher.computerNameChanged.connect(function() { hostName = launcher.computerName })
+             launcher.execute(ComputerManager)
+         }
+     }
+ 
+-    Row {
+-        anchors.centerIn: parent
+-        spacing: 5
+-
+-        BusyIndicator {
+-            id: stageSpinner
+-            running: visible
+-        }
+-
+-        Label {
+-            id: stageLabel
+-            height: stageSpinner.height
+-            font.pointSize: 20
+-            verticalAlignment: Text.AlignVCenter
+-
+-            wrapMode: Text.Wrap
+-        }
++    EclipseSplash {
++        hostName: hostName
++        connected: false
+     }
+ 
+     ErrorMessageDialog {
+diff --git c/app/gui/EclipseSplash.qml i/app/gui/EclipseSplash.qml
+new file mode 100644
+index 00000000..7a1cea84
+--- /dev/null
++++ i/app/gui/EclipseSplash.qml
+@@ -0,0 +1,73 @@
++import QtQuick 2.0
++import QtQuick.Controls 2.2
++
++Item {
++    id: root
++    anchors.fill: parent
++
++    property string hostName: "host"
++    property bool connected: false
++
++    readonly property color eclipseBg: "#0f0f29"
++    readonly property color moonlight: "#d9d9fc"
++    readonly property color sunshine: "#f7c708"
++    readonly property color success: "#3ecf8e"
++
++    FontLoader {
++        id: archivoFont
++        source: "qrc:/res/eclipse/Archivo-SemiBold.ttf"
++    }
++    FontLoader {
++        id: monoFont
++        source: "qrc:/res/eclipse/JetBrainsMono-Regular.ttf"
++    }
++
++    Column {
++        anchors.centerIn: parent
++        spacing: 36
++
++        Row {
++            spacing: 16
++            anchors.horizontalCenter: parent.horizontalCenter
++
++            Image {
++                source: "qrc:/res/eclipse-logo.svg"
++                sourceSize.width: 48
++                sourceSize.height: 48
++                anchors.verticalCenter: parent.verticalCenter
++            }
++
++            Text {
++                text: "Eclipse Stream"
++                color: root.moonlight
++                font.family: archivoFont.name !== "" ? archivoFont.name : "sans-serif"
++                font.pixelSize: 48
++                font.weight: Font.DemiBold
++                anchors.verticalCenter: parent.verticalCenter
++            }
++        }
++
++        Rectangle {
++            id: statusBox
++            anchors.horizontalCenter: parent.horizontalCenter
++            color: root.connected ? root.success : "transparent"
++            width: statusLabel.implicitWidth + (root.connected ? 48 : 0)
++            height: statusLabel.implicitHeight + (root.connected ? 24 : 0)
++
++            Behavior on color {
++                ColorAnimation { duration: 180 }
++            }
++
++            Text {
++                id: statusLabel
++                anchors.centerIn: parent
++                color: root.connected ? root.eclipseBg : root.moonlight
++                font.family: monoFont.name !== "" ? monoFont.name : "monospace"
++                font.pixelSize: 18
++                text: root.connected
++                      ? qsTr("Connected to %1").arg(root.hostName)
++                      : qsTr("Connecting to %1").arg(root.hostName)
++            }
++        }
++    }
++}
+diff --git c/app/gui/StreamSegue.qml i/app/gui/StreamSegue.qml
+index 377b5337..3ecba2c1 100644
+--- c/app/gui/StreamSegue.qml
++++ i/app/gui/StreamSegue.qml
+@@ -9,14 +9,15 @@ import SystemProperties 1.0
+ Item {
+     property Session session
+     property string appName
++    property string hostName: appName
+     property string stageText : isResume ? qsTr("Resuming %1...").arg(appName) :
+                                            qsTr("Starting %1...").arg(appName)
+     property bool isResume : false
+     property bool quitAfter : false
++    property bool splashConnected : false
+ 
+     function stageStarting(stage)
+     {
+-        // Update the spinner text
+         stageText = qsTr("Starting %1...").arg(stage)
+     }
+ 
+@@ -32,14 +33,9 @@ Item {
+ 
+     function connectionStarted()
+     {
+-        // Hide the UI contents so the user doesn't
+-        // see them briefly when we pop off the StackView
+-        stageSpinner.visible = false
+-        stageLabel.visible = false
+-        hintText.visible = false
+-
+-        // Hide the window now that streaming has begun
+-        window.visible = false
++        // Stay on the Eclipse splash (green) while Session::exec() holds for 1s,
++        // then the SDL stream window takes over.
++        splashConnected = true
+     }
+ 
+     function displayLaunchError(text)
+@@ -126,22 +122,9 @@ Item {
+         SystemProperties.waitForAsyncLoad()
+ 
+         // Kick off the stream
+-        spinnerTimer.start()
+         streamLoader.active = true
+     }
+ 
+-    Timer {
+-        id: spinnerTimer
+-
+-        // Display the spinner appearance a bit to allow us to reach
+-        // the code in Session.exec() that pumps the event loop.
+-        // If we display it immediately, it will briefly hang in the
+-        // middle of the animation on Windows, which looks very
+-        // obviously broken.
+-        interval: 100
+-        onTriggered: stageSpinner.visible = true
+-    }
+-
+     Timer {
+         id: startSessionTimer
+         onTriggered: {
+@@ -161,13 +144,6 @@ Item {
+         asynchronous: true
+ 
+         onLoaded: {
+-            // Set the hint text. We do this here rather than
+-            // in the hintText control itself to synchronize
+-            // with Session.exec() which requires no concurrent
+-            // gamepad usage.
+-            hintText.text = qsTr("Tip:") + " " + qsTr("Press %1 to disconnect your session").arg(SdlGamepadKeyNavigation.getConnectedGamepads() > 0 ?
+-                                                  qsTr("Start+Select+L1+R1") : qsTr("Ctrl+Alt+Shift+Q"))
+-
+             // Stop GUI gamepad usage now
+             SdlGamepadKeyNavigation.disable()
+ 
+@@ -208,35 +184,8 @@ Item {
+         sourceComponent: Item {}
+     }
+ 
+-    Row {
+-        anchors.centerIn: parent
+-        spacing: 5
+-
+-        BusyIndicator {
+-            id: stageSpinner
+-            running: visible
+-            visible: false
+-        }
+-
+-        Label {
+-            id: stageLabel
+-            height: stageSpinner.height
+-            text: stageText
+-            font.pointSize: 20
+-            verticalAlignment: Text.AlignVCenter
+-
+-            wrapMode: Text.Wrap
+-        }
+-    }
+-
+-    Label {
+-        id: hintText
+-        anchors.bottom: parent.bottom
+-        anchors.bottomMargin: 50
+-        anchors.horizontalCenter: parent.horizontalCenter
+-        font.pointSize: 18
+-        verticalAlignment: Text.AlignVCenter
+-
+-        wrapMode: Text.Wrap
++    EclipseSplash {
++        hostName: hostName
++        connected: splashConnected
+     }
+ }
+diff --git c/app/gui/main.qml i/app/gui/main.qml
+index 84e7d9de..b05f0514 100644
+--- c/app/gui/main.qml
++++ i/app/gui/main.qml
+@@ -24,12 +24,10 @@ ApplicationWindow {
+ 
+     // This function runs prior to creation of the initial StackView item
+     function doEarlyInit() {
+-        // Override the background color to Material 2 colors for Qt 6.5+
+-        // in order to improve contrast between GFE's placeholder box art
+-        // and the background of the app grid.
+-        if (SystemProperties.usesMaterial3Theme) {
+-            Material.background = "#303030"
+-        }
++        Material.background = "#0f0f29"
++        Material.foreground = "#d9d9fc"
++        Material.accent = "#f7c708"
++        Material.primary = "#0f0f29"
+ 
+         SdlGamepadKeyNavigation.enable()
+     }
+diff --git c/app/qml.qrc i/app/qml.qrc
+index 5c2c369f..79f390e3 100644
+--- c/app/qml.qrc
++++ i/app/qml.qrc
+@@ -12,6 +12,7 @@
+         <file>gui/NavigableMenuItem.qml</file>
+         <file>gui/CliQuitStreamSegue.qml</file>
+         <file>gui/CliStartStreamSegue.qml</file>
++        <file>gui/EclipseSplash.qml</file>
+         <file>gui/AutoResizingComboBox.qml</file>
+         <file>gui/NavigableMenu.qml</file>
+         <file>gui/ErrorMessageDialog.qml</file>
+diff --git c/app/res/eclipse-logo.svg i/app/res/eclipse-logo.svg
+new file mode 100644
+index 00000000..f8168382
+--- /dev/null
++++ i/app/res/eclipse-logo.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d9d9fc" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
++  <circle cx="12" cy="12" r="10"/>
++  <path d="M12 2a7 7 0 1 0 10 10"/>
++</svg>
+diff --git c/app/resources.qrc i/app/resources.qrc
+index 04b71edc..a0780561 100644
+--- c/app/resources.qrc
++++ i/app/resources.qrc
+@@ -13,6 +13,9 @@
+         <file>res/arrow_left.svg</file>
+         <file>res/question_mark.svg</file>
+         <file>res/moonlight.svg</file>
++        <file>res/eclipse-logo.svg</file>
++        <file>res/eclipse/Archivo-SemiBold.ttf</file>
++        <file>res/eclipse/JetBrainsMono-Regular.ttf</file>
+         <file>res/update.svg</file>
+         <file>res/baseline-help_outline-24px.svg</file>
+         <file>res/baseline-error_outline-24px.svg</file>
+diff --git c/app/streaming/input/keyboard.cpp i/app/streaming/input/keyboard.cpp
+index b195f73b..12290076 100644
+--- c/app/streaming/input/keyboard.cpp
++++ i/app/streaming/input/keyboard.cpp
+@@ -185,6 +185,29 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+         return;
+     }
+ 
++    // Eclipse: Ctrl+Esc disconnects, Ctrl+Tab toggles fullscreen, Ctrl+` minimises.
++    // These are consumed locally so they never reach the host.
++    if (event->state == SDL_PRESSED) {
++        const bool ctrlOnly =
++            (event->keysym.mod & KMOD_CTRL) &&
++            !(event->keysym.mod & (KMOD_ALT | KMOD_SHIFT | KMOD_GUI));
++        if (ctrlOnly) {
++            if (event->keysym.sym == SDLK_ESCAPE) {
++                performSpecialKeyCombo(KeyComboQuit);
++                return;
++            }
++            if (event->keysym.sym == SDLK_TAB) {
++                performSpecialKeyCombo(KeyComboToggleFullScreen);
++                return;
++            }
++            if (event->keysym.sym == SDLK_BACKQUOTE ||
++                    event->keysym.scancode == SDL_SCANCODE_GRAVE) {
++                performSpecialKeyCombo(KeyComboToggleMinimize);
++                return;
++            }
++        }
++    }
++
+     // Check for our special key combos
+     if ((event->state == SDL_PRESSED) &&
+             (event->keysym.mod & KMOD_CTRL) &&
+diff --git c/app/streaming/session.cpp i/app/streaming/session.cpp
+index 40c1e59c..717f3694 100644
+--- c/app/streaming/session.cpp
++++ i/app/streaming/session.cpp
+@@ -40,6 +40,8 @@
+ #include <QGuiApplication>
+ #include <QCursor>
+ #include <QScreen>
++#include <QTimer>
++#include <QEventLoop>
+ 
+ #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+ #include <QQuickOpenGLUtils>
+@@ -1794,6 +1796,16 @@ void Session::exec()
+     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+     QCoreApplication::sendPostedEvents();
+ 
++    // Hold the Eclipse splash on "connected" (green) for 1s, then open the stream.
++    {
++        QEventLoop hold;
++        QTimer::singleShot(1000, &hold, &QEventLoop::quit);
++        hold.exec(QEventLoop::ExcludeUserInputEvents);
++    }
++    if (m_QtWindow != nullptr) {
++        m_QtWindow->setVisible(false);
++    }
++
+     int x, y, width, height;
+     getWindowDimensions(x, y, width, height);
+ 

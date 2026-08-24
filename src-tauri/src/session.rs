@@ -14,6 +14,9 @@ use crate::sidecar::MOONLIGHT;
 const DESKTOP_APP: &str = "Desktop";
 const POST_PIN_SETTLE: Duration = Duration::from_secs(3);
 const PAIR_START_GRACE: Duration = Duration::from_millis(400);
+pub const STREAM_WIDTH: u32 = 1920;
+pub const STREAM_HEIGHT: u32 = 1080;
+pub const STREAM_FPS: u32 = 60;
 
 pub fn list_args(peer_ip: &str) -> Vec<String> {
     vec!["list".into(), peer_ip.into()]
@@ -35,6 +38,8 @@ pub fn stream_args(peer_ip: &str) -> Vec<String> {
     vec![
         "stream".into(),
         "--1080".into(),
+        "--fps".into(),
+        STREAM_FPS.to_string(),
         "--video-codec".into(),
         "H.264".into(),
         "--no-hdr".into(),
@@ -69,10 +74,21 @@ fn kill_child(child: Option<Child>) {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStatus {
+    pub connected: bool,
+    pub ip: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
 /// Holds Moonlight pair/stream children. One Connect at a time.
 pub struct SessionProcess {
     pair: Mutex<Option<Child>>,
     stream: Mutex<Option<Child>>,
+    connected_ip: Mutex<Option<String>>,
 }
 
 impl SessionProcess {
@@ -80,6 +96,7 @@ impl SessionProcess {
         Self {
             pair: Mutex::new(None),
             stream: Mutex::new(None),
+            connected_ip: Mutex::new(None),
         }
     }
 
@@ -88,6 +105,27 @@ impl SessionProcess {
         kill_child(pair);
         let stream = self.stream.lock().unwrap_or_else(|e| e.into_inner()).take();
         kill_child(stream);
+        *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub fn status(&self) -> SessionStatus {
+        let connected = self.stream_still_running();
+        let ip = if connected {
+            self.connected_ip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        } else {
+            *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            None
+        };
+        SessionStatus {
+            connected,
+            ip,
+            width: STREAM_WIDTH,
+            height: STREAM_HEIGHT,
+            fps: STREAM_FPS,
+        }
     }
 
     pub fn connect(&self, peer_ip: &str) -> Result<(), String> {
@@ -111,6 +149,7 @@ impl SessionProcess {
             .spawn_args(&stream_args(ip))
             .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;
         *self.stream.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = Some(ip.to_string());
         Ok(())
     }
 
@@ -153,6 +192,24 @@ impl SessionProcess {
             None => false,
         }
     }
+
+    fn stream_still_running(&self) -> bool {
+        let mut slot = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => {
+                    *slot = None;
+                    false
+                }
+                Err(_) => {
+                    *slot = None;
+                    false
+                }
+            },
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +233,8 @@ mod tests {
             [
                 "stream",
                 "--1080",
+                "--fps",
+                "60",
                 "--video-codec",
                 "H.264",
                 "--no-hdr",
@@ -197,5 +256,11 @@ mod tests {
     fn pair_still_running_is_false_without_child() {
         let session = SessionProcess::new();
         assert!(!session.pair_still_running());
+        let status = session.status();
+        assert!(!status.connected);
+        assert!(status.ip.is_none());
+        assert_eq!(status.width, STREAM_WIDTH);
+        assert_eq!(status.height, STREAM_HEIGHT);
+        assert_eq!(status.fps, STREAM_FPS);
     }
 }

@@ -4,7 +4,7 @@ mod session;
 mod sidecar;
 
 use discovery::DiscoverySnapshot;
-use session::SessionProcess;
+use session::{SessionProcess, SessionStatus};
 use sidecar::{HostProcess, SidecarStatus};
 use tauri::{Manager, State};
 
@@ -16,6 +16,21 @@ fn sidecar_status(host: State<HostProcess>) -> SidecarStatus {
 #[tauri::command]
 fn list_peers() -> DiscoverySnapshot {
     discovery::list_peers()
+}
+
+#[tauri::command]
+fn session_status(session: State<SessionProcess>) -> SessionStatus {
+    session.status()
+}
+
+#[tauri::command]
+fn disconnect(session: State<SessionProcess>) {
+    session.stop();
+}
+
+#[tauri::command]
+fn peer_latency(ip: String) -> Option<u32> {
+    discovery::peer_latency_ms(&ip)
 }
 
 #[tauri::command]
@@ -31,7 +46,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(HostProcess::new())
         .manage(SessionProcess::new())
-        .invoke_handler(tauri::generate_handler![sidecar_status, list_peers, connect])
+        .invoke_handler(tauri::generate_handler![
+            sidecar_status,
+            list_peers,
+            connect,
+            disconnect,
+            session_status,
+            peer_latency
+        ])
         .setup(|app| {
             app.state::<HostProcess>().start_sunshine();
             Ok(())

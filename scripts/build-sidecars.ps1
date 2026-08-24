@@ -112,7 +112,28 @@ function Apply-SunshinePatches {
     }
 }
 
+function Apply-MoonlightPatches {
+    $patchDir = Join-Path $Root "patches"
+    $patches = @(Get-ChildItem $patchDir -Filter "moonlight-*.patch" -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($patches.Count -eq 0) {
+        throw "No patches/moonlight-*.patch files found"
+    }
+    foreach ($patch in $patches) {
+        git -C $MoonlightSrc apply --reverse --check $patch.FullName 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Already applied $($patch.Name)"
+            continue
+        }
+        Write-Host "==> Applying $($patch.Name)"
+        git -C $MoonlightSrc apply --whitespace=nowarn $patch.FullName
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "git apply failed for $($patch.Name) (exit $LASTEXITCODE)"
+        }
+    }
+}
+
 Apply-SunshinePatches
+Apply-MoonlightPatches
 
 $Triple = (rustc --print host-tuple).Trim()
 Write-Host "Host triple: $Triple"
@@ -176,6 +197,14 @@ if (-not (Test-Path $moonLibs)) {
 }
 
 Write-Host "==> Building Moonlight"
+$fontDir = Join-Path $Root "assets\fonts"
+$moonFontDir = Join-Path $MoonlightSrc "app\res\eclipse"
+New-Item -ItemType Directory -Force -Path $moonFontDir | Out-Null
+foreach ($font in @("Archivo-SemiBold.ttf", "JetBrainsMono-Regular.ttf")) {
+    $src = Join-Path $fontDir $font
+    if (-not (Test-Path $src)) { throw "Missing Eclipse font $src" }
+    Copy-Item $src $moonFontDir -Force
+}
 Push-Location $BuildMoon
 & $qmake.Source (Join-Path $MoonlightSrc "moonlight-qt.pro") "CONFIG+=release"
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {

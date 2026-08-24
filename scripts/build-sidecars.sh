@@ -90,6 +90,25 @@ apply_sunshine_patches() {
   fi
 }
 
+apply_moonlight_patches() {
+  local patch
+  shopt -s nullglob
+  local found=0
+  for patch in "${ROOT}/patches/moonlight-"*.patch; do
+    found=1
+    if git -C "${MOONLIGHT_SRC}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
+      echo "Already applied $(basename "${patch}")"
+      continue
+    fi
+    echo "==> Applying $(basename "${patch}")"
+    git -C "${MOONLIGHT_SRC}" apply --whitespace=nowarn "${patch}"
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    echo "No patches/moonlight-*.patch files found" >&2
+    exit 1
+  fi
+}
+
 # Sunshine FindUdev/FindSystemd write absolute /usr destinations; keep them in PREFIX.
 keep_sunshine_install_in_prefix() {
   local inst="${BUILD_SUN}/cmake_install.cmake"
@@ -109,6 +128,7 @@ keep_sunshine_install_in_prefix() {
 }
 
 apply_sunshine_patches
+apply_moonlight_patches
 
 mkdir -p "${BIN_DIR}" "${ASSET_DIR}" "${BUILD_SUN}" "${BUILD_MOON}" "${PREFIX}"
 
@@ -147,6 +167,13 @@ fi
 echo "Installed ${BIN_DIR}/sunshine-${TRIPLE}"
 
 echo "==> Building Moonlight"
+mkdir -p "${MOONLIGHT_SRC}/app/res/eclipse"
+if [[ ! -f "${ROOT}/assets/fonts/Archivo-SemiBold.ttf" || ! -f "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" ]]; then
+  echo "Missing Eclipse fonts in assets/fonts (Archivo-SemiBold.ttf, JetBrainsMono-Regular.ttf)" >&2
+  exit 1
+fi
+cp "${ROOT}/assets/fonts/Archivo-SemiBold.ttf" "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" \
+  "${MOONLIGHT_SRC}/app/res/eclipse/"
 pushd "${BUILD_MOON}" >/dev/null
 qmake6 "${MOONLIGHT_SRC}/moonlight-qt.pro" CONFIG+=release
 make -j"$(nproc)"

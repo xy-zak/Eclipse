@@ -1,5 +1,25 @@
 @import "tailwindcss";
 
+@theme {
+  --color-eclipse: #0f0f29;
+  --color-moonlight: #d9d9fc;
+  --color-sunshine: #f7c708;
+  --color-success: #3ecf8e;
+  --color-fail: #f05252;
+  --font-sans: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-title: "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+  --radius-DEFAULT: 0px;
+}
+
 html,
 body,
 #root {
@@ -8,7 +28,7 @@ body,
 
 body {
   margin: 0;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #0b1220;
-  color: #e8eefc;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  background: #0f0f29;
+  color: #d9d9fc;
 }

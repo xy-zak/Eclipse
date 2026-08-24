@@ -6,7 +6,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Compile-time Sunshine assets path used by the Windows sidecar build
 /// (`-DSUNSHINE_ASSETS_DIR=share/sunshine`). Sunshine concatenates this with
@@ -44,14 +44,16 @@ impl Health {
 }
 
 pub fn probe_tcp(host: &str, port: u16, timeout: Duration) -> bool {
+    probe_tcp_ms(host, port, timeout).is_some()
+}
+
+/// Round-trip time of a TCP connect to `host:port`, in milliseconds.
+pub fn probe_tcp_ms(host: &str, port: u16, timeout: Duration) -> Option<u32> {
     let addr = format!("{host}:{port}");
-    let Ok(mut addrs) = addr.to_socket_addrs() else {
-        return false;
-    };
-    let Some(sock) = addrs.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&sock, timeout).is_ok()
+    let sock = addr.to_socket_addrs().ok()?.next()?;
+    let start = Instant::now();
+    TcpStream::connect_timeout(&sock, timeout).ok()?;
+    Some(start.elapsed().as_millis() as u32)
 }
 
 pub const SUNSHINE: Engine = Engine {

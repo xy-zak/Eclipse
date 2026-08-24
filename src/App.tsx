@@ -1,49 +1,92 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { currentMonitor } from "@tauri-apps/api/window";
+import { Eclipse, Loader2, Moon, RefreshCw, Sun, Wifi } from "lucide-react";
+import { Button } from "./components/Button";
+import { ClientPanel } from "./components/ClientPanel";
+import { HostPanel } from "./components/HostPanel";
+import { StatusMark } from "./components/StatusMark";
+import { TitleBar } from "./components/TitleBar";
+import type {
+  DiscoverySnapshot,
+  LocalNode,
+  SessionStatus,
+  SidecarStatus,
+} from "./types";
 
-type SidecarStatus = {
-  sunshinePresent: boolean;
-  moonlightPresent: boolean;
-  sunshineRunning: boolean;
-  hostTriple: string;
-};
-
-type Peer = {
-  hostname: string;
-  ip: string;
-  hostOnline: boolean;
-  tailscaleOnline: boolean;
-};
-
-type DiscoverySnapshot = {
-  peers: Peer[];
-  tailscaleOk: boolean;
-  message: string | null;
-};
-
-function pill(ok: boolean, label: string) {
-  return (
-    <span
-      className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-        ok ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-700/80 text-zinc-300"
-      }`}
-    >
-      {label}
-    </span>
-  );
+function fallbackResolution(): string {
+  if (typeof window === "undefined") {
+    return "—";
+  }
+  const dpr = window.devicePixelRatio || 1;
+  return `${Math.round(window.screen.width * dpr)}×${Math.round(window.screen.height * dpr)}`;
 }
 
-function App() {
+async function clientResolution(local: LocalNode | null): Promise<string> {
+  if (local?.displayWidth && local?.displayHeight) {
+    return `${local.displayWidth}×${local.displayHeight}`;
+  }
+  try {
+    const mon = await currentMonitor();
+    if (mon?.size.width && mon.size.height) {
+      return `${mon.size.width}×${mon.size.height}`;
+    }
+  } catch {
+    // Permission or runtime without a window; use CSS pixels × DPR.
+  }
+  return fallbackResolution();
+}
+
+function formatMbps(mbps: number | null): string {
+  if (mbps === null || !Number.isFinite(mbps)) {
+    return "—";
+  }
+  if (mbps < 0.1) {
+    return `${(mbps * 1000).toFixed(0)} kb/s`;
+  }
+  return `${mbps.toFixed(1)} Mb/s`;
+}
+
+export default function App() {
   const [status, setStatus] = useState<SidecarStatus | null>(null);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
+  const [session, setSession] = useState<SessionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [connectingIp, setConnectingIp] = useState<string | null>(null);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
+  const [resolution, setResolution] = useState(fallbackResolution);
+  const traffic = useRef<{ t: number; bytes: number } | null>(null);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
-  const refreshPeers = useCallback(() => {
-    setLoading(true);
+  const refreshPeers = useCallback((showLoading = false) => {
+    if (showLoading) {
+      setLoading(true);
+    }
     invoke<DiscoverySnapshot>("list_peers")
-      .then(setDiscovery)
+      .then((snap) => {
+        setDiscovery(snap);
+        const current = sessionRef.current;
+        const ip = current?.ip;
+        if (!current?.connected || !ip) {
+          traffic.current = null;
+          setThroughputMbps(null);
+          return;
+        }
+        const peer = snap.peers.find((p) => p.ip === ip);
+        const bytes = (peer?.rxBytes ?? 0) + (peer?.txBytes ?? 0);
+        const now = Date.now();
+        const prev = traffic.current;
+        if (prev && now > prev.t) {
+          const mbps = ((bytes - prev.bytes) * 8) / ((now - prev.t) / 1000) / 1e6;
+          if (mbps >= 0) {
+            setThroughputMbps(mbps);
+          }
+        }
+        traffic.current = { t: now, bytes };
+      })
       .catch((err: unknown) => setError(String(err)))
       .finally(() => setLoading(false));
   }, []);
@@ -52,100 +95,178 @@ function App() {
     invoke<SidecarStatus>("sidecar_status")
       .then(setStatus)
       .catch((err: unknown) => setError(String(err)));
-    refreshPeers();
+    refreshPeers(true);
   }, [refreshPeers]);
+
+  useEffect(() => {
+    const update = () => {
+      void clientResolution(discovery?.local ?? null).then(setResolution);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [discovery?.local]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      invoke<SidecarStatus>("sidecar_status").then(setStatus).catch(() => {});
+      invoke<SessionStatus>("session_status")
+        .then(setSession)
+        .catch(() => {});
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => refreshPeers(false), 3000);
+    return () => window.clearInterval(id);
+  }, [refreshPeers]);
+
+  useEffect(() => {
+    if (!session?.connected || !session.ip) {
+      setLatencyMs(null);
+      return;
+    }
+    const ping = () => {
+      invoke<number | null>("peer_latency", { ip: session.ip })
+        .then(setLatencyMs)
+        .catch(() => setLatencyMs(null));
+    };
+    ping();
+    const id = window.setInterval(ping, 2000);
+    return () => window.clearInterval(id);
+  }, [session?.connected, session?.ip]);
 
   const connect = (ip: string) => {
     setError(null);
     setConnectingIp(ip);
     invoke("connect", { ip })
+      .then(() => invoke<SessionStatus>("session_status").then(setSession))
       .catch((err: unknown) => setError(String(err)))
       .finally(() => setConnectingIp(null));
   };
 
+  const disconnect = () => {
+    setError(null);
+    invoke("disconnect")
+      .then(() => {
+        traffic.current = null;
+        setThroughputMbps(null);
+        setLatencyMs(null);
+        setSession({ connected: false, ip: null, width: 1920, height: 1080, fps: 60 });
+      })
+      .catch((err: unknown) => setError(String(err)));
+  };
+
   const peers = discovery?.peers ?? [];
   const moonlightReady = Boolean(status?.moonlightPresent);
+  const sunshineReady = Boolean(status?.sunshinePresent && status.sunshineRunning);
+  const hostResolution = session
+    ? `${session.width}×${session.height}`
+    : "1920×1080";
 
   return (
-    <main className="mx-auto flex min-h-full max-w-3xl flex-col gap-8 px-8 py-10">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <p className="text-sm uppercase tracking-[0.2em] text-sky-300/80">Control plane</p>
-          <h1 className="mt-1 text-3xl font-semibold">Eclipse</h1>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2">
-          {pill(Boolean(status?.sunshinePresent), "Sunshine sidecar")}
-          {pill(Boolean(status?.moonlightPresent), "Moonlight sidecar")}
-          {pill(Boolean(status?.sunshineRunning), "Host process")}
-        </div>
-      </header>
+    <div className="flex h-full min-h-0 flex-col bg-eclipse text-moonlight">
+      <TitleBar />
+      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 overflow-y-auto px-8 py-8">
+        <header className="flex flex-col items-center text-center">
+          <h1 className="font-title flex items-center gap-3 text-5xl font-semibold tracking-tight">
+            <Eclipse size={40} strokeWidth={1.75} />
+            Eclipse
+          </h1>
+          <div className="mt-4 flex flex-wrap justify-center gap-x-8 gap-y-2">
+            <StatusMark
+              ok={sunshineReady}
+              label="Sunshine"
+              icon={<Sun size={16} strokeWidth={2} />}
+            />
+            <StatusMark
+              ok={moonlightReady}
+              label="Moonlight"
+              icon={<Moon size={16} strokeWidth={2} />}
+            />
+            <StatusMark
+              ok={Boolean(discovery?.local?.tailscaleOnline)}
+              label="Tailscale"
+              icon={<Wifi size={16} strokeWidth={2} />}
+            />
+          </div>
+        </header>
 
-      <section className="rounded-2xl border border-white/10 bg-white/5 p-5">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-medium">Peers</h2>
-          <button
-            type="button"
-            onClick={refreshPeers}
-            disabled={loading}
-            className="rounded-lg border border-white/15 px-3 py-2 text-sm text-zinc-200 hover:bg-white/5 disabled:opacity-50"
-          >
-            {loading ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
+        <section className="flex flex-col gap-4">
+            <h2 className="font-title flex items-center gap-2 text-2xl font-semibold tracking-tight text-moonlight">
+            <Moon size={22} strokeWidth={2} />
+            Client
+          </h2>
+          <ClientPanel
+            local={discovery?.local ?? null}
+            resolution={resolution}
+            streamFps={session?.fps ?? 60}
+          />
+        </section>
 
-        {!discovery?.tailscaleOk && discovery?.message ? (
-          <p className="text-sm text-amber-200/90">{discovery.message}</p>
-        ) : null}
+        <section className="flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-title flex items-center gap-2 text-2xl font-semibold tracking-tight text-sunshine">
+              <Sun size={22} strokeWidth={2} />
+              Hosts
+            </h2>
+            <Button
+              variant="ghost"
+              className="h-9 w-9 border-sunshine px-0 text-sunshine hover:bg-sunshine hover:text-eclipse disabled:border-sunshine disabled:text-sunshine"
+              aria-label="Refresh"
+              onClick={() => refreshPeers(true)}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2 size={16} strokeWidth={2} className="animate-spin" />
+              ) : (
+                <RefreshCw size={16} strokeWidth={2} />
+              )}
+            </Button>
+          </div>
 
-        {discovery?.tailscaleOk && peers.length === 0 ? (
-          <p className="text-sm text-zinc-400">
-            No other machines on this tailnet. Log another PC into the same Tailscale
-            account to see it here.
-          </p>
-        ) : null}
+          {!discovery?.tailscaleOk && discovery?.message ? (
+            <p className="border border-fail px-4 py-3 text-sm text-fail">
+              {discovery.message}
+            </p>
+          ) : null}
 
-        {peers.length > 0 ? (
-          <ul className="divide-y divide-white/10">
-            {peers.map((peer) => {
-              const canConnect =
-                peer.hostOnline && moonlightReady && connectingIp === null;
-              const connecting = connectingIp === peer.ip;
-              return (
-                <li
-                  key={`${peer.hostname}-${peer.ip}`}
-                  className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
-                >
-                  <div>
-                    <p className="font-medium">{peer.hostname}</p>
-                    <p className="font-mono text-xs text-zinc-500">{peer.ip}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    {pill(peer.tailscaleOnline, peer.tailscaleOnline ? "On tailnet" : "Offline")}
-                    {pill(peer.hostOnline, peer.hostOnline ? "Eclipse host" : "No Sunshine")}
-                    <button
-                      type="button"
-                      disabled={!canConnect}
-                      onClick={() => connect(peer.ip)}
-                      className="rounded-lg bg-sky-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-400 disabled:bg-sky-500/30 disabled:text-sky-100/70"
-                    >
-                      {connecting ? "Connecting…" : "Connect"}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        ) : null}
+          {discovery?.tailscaleOk && peers.length === 0 ? (
+            <p className="border border-moonlight px-4 py-3 text-sm">
+              No other machines on this tailnet. Log another PC into the same
+              Tailscale account to see it here.
+            </p>
+          ) : null}
 
-        {error ? <p className="mt-3 text-sm text-rose-300">{error}</p> : null}
-        {status ? (
-          <p className="mt-4 font-mono text-xs text-zinc-500">
-            host triple: {status.hostTriple}
-          </p>
-        ) : null}
-      </section>
-    </main>
+          {peers.map((peer) => {
+            const connected = Boolean(session?.connected && session.ip === peer.ip);
+            const connecting = connectingIp === peer.ip;
+            const canConnect =
+              peer.hostOnline && moonlightReady && connectingIp === null && !session?.connected;
+            return (
+              <HostPanel
+                key={`${peer.hostname}-${peer.ip}`}
+                peer={peer}
+                connected={connected}
+                connecting={connecting}
+                canConnect={canConnect}
+                throughput={connected ? formatMbps(throughputMbps) : "—"}
+                hostResolution={connected ? hostResolution : "—"}
+                latency={
+                  connected && latencyMs != null ? `${latencyMs} ms` : "—"
+                }
+                onConnect={() => connect(peer.ip)}
+                onDisconnect={disconnect}
+              />
+            );
+          })}
+
+          {error ? (
+            <p className="border border-fail px-4 py-3 text-sm text-fail">{error}</p>
+          ) : null}
+        </section>
+      </main>
+    </div>
   );
 }
-
-export default App;
