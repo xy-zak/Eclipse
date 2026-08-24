@@ -1,0 +1,37 @@
+diff --git i/src/platform/linux/graphics.cpp w/src/platform/linux/graphics.cpp
+index 1ef27c71..5f73a3de 100644
+--- i/src/platform/linux/graphics.cpp
++++ w/src/platform/linux/graphics.cpp
+@@ -639,10 +639,31 @@ namespace egl {
+    */
+   std::optional<rgb_t> import_source(display_t::pointer egl_display, const surface_descriptor_t &xrgb) {
+     auto attribs = surface_descriptor_to_egl_attribs(xrgb);
++    auto image = eglCreateImage(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data());
++
++    if (!image) {
++      auto err = eglGetError();
++      if (err == EGL_BAD_MATCH && xrgb.modifier != DRM_FORMAT_MOD_INVALID) {
++        // First eglCreateImage returned EGL_NO_IMAGE; nothing to destroy.
++        auto fallback = xrgb;
++        fallback.modifier = DRM_FORMAT_MOD_INVALID;
++        attribs = surface_descriptor_to_egl_attribs(fallback);
++        image = eglCreateImage(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data());
++        if (image) {
++          BOOST_LOG(warning) << "Imported RGB DMA-BUF without format modifier (EGL_BAD_MATCH fallback)"sv;
++        } else {
++          err = eglGetError();
++        }
++      }
++      if (!image) {
++        BOOST_LOG(error) << "Couldn't import RGB Image: "sv << util::hex(err).to_string_view();
++        return std::nullopt;
++      }
++    }
+ 
+     rgb_t rgb {
+       egl_display,
+-      eglCreateImage(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data()),
++      image,
+       gl::tex_t::make(1)
+     };
+ 

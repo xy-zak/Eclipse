@@ -77,14 +77,16 @@ It uses `winget` for Git, Node LTS, CMake, Ninja, rustup, VS Build Tools (C++ wo
 
 ### Linux host permissions (same as users)
 
-If you will test input injection on this machine:
+If this machine will host a stream or inject input:
 
 ```bash
-sudo groupadd -f input
-sudo usermod -aG input "$USER"
+./scripts/linux-host-perms.sh
+./scripts/linux-host-perms.sh --status
 ```
 
-Then log out. The sidecar CMake install writes udev/systemd units into `src-tauri/resources/sunshine-prefix/`, **not** `/usr`. That is intentional so a developer build does not touch system udev.
+That setcaps every Sunshine binary it finds (Tauri copies strip capabilities), installs udev rules into `/etc`, and adds the user to `input`. Re-run after sidecar rebuilds and after the first `tauri dev` copy. Details: [Video.md](Video.md).
+
+The sidecar CMake install still writes udev/systemd units into `src-tauri/resources/sunshine-prefix/` as well; that prefix is not loaded by the system.
 
 ---
 
@@ -142,9 +144,9 @@ src-tauri/resources/moonlight-runtime/              # Windows Qt/SDL/FFmpeg (git
 
 Example Linux triple: `x86_64-unknown-linux-gnu`. Tauri `externalBin` is `binaries/sunshine` and `binaries/moonlight`; the build system appends the triple. `cargo` / `tauri dev` fail with a missing-file error until these exist.
 
-Sunshine is installed into a local prefix `src-tauri/resources/sunshine-prefix/` (gitignored) so asset paths do not point at `/usr`. CMake is passed `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside that prefix so install does not write to `/usr`.
+Sunshine is installed into a local prefix `src-tauri/resources/sunshine-prefix/` (gitignored) so asset paths do not point at `/usr`. CMake is passed `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside that prefix. Upstream `FindUdev.cmake` otherwise overwrites those dirs from pkg-config (`/usr/lib/udev`); [`patches/sunshine-udev-prefix.patch`](../patches/sunshine-udev-prefix.patch) plus a rewrite of `cmake_install.cmake` keep install inside `PREFIX`. Before configure, both sidecar scripts apply `patches/sunshine-*.patch`.
 
-Rebuild sidecars after pulling engine submodule updates, or after changing `ECLIPSE_CUDA`.
+Rebuild sidecars after pulling engine submodule updates, after changing `ECLIPSE_CUDA`, or to pick up that EGL patch.
 
 ### Run the control plane
 
@@ -181,7 +183,8 @@ Eclipse/
       lib.rs                    # Tauri setup; sidecar_status, list_peers, connect
       sidecar.rs                # Engine adapter (resolve / spawn / health / --creds)
       discovery.rs              # Tailscale peers + Sunshine TCP probe
-      pairing.rs                # POST /api/pin
+      pairing.rs                # POST /api/pin; host log/RTSP preflight
+      session.rs                # Moonlight list / pair / stream
       session.rs                # Moonlight list / pair / stream
     tauri.conf.json
   vendor/PINS                    # required submodule SHAs
@@ -197,9 +200,13 @@ Sunshine HTTPS contract (stop Eclipse first if port 47990 is taken):
 
 ```bash
 ./scripts/smoke-sunshine.sh
+# video (needs a desktop session):
+./scripts/smoke-video.sh loopback
 # or:
 ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_smoke
 ```
+
+Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes: [Video.md](Video.md).
 
 ---
 
@@ -212,7 +219,7 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | Sunshine spawn ENOENT | Dev copies are named `sunshine` next to the debug exe; source copies are `sunshine-<triple>` under `binaries/`. `sidecar.rs` `Engine::resolve` handles both. |
 | Moonlight fails on `pix_fmts` / Vulkan hwcontext | You are on Moonlight `v6.1.0` + FFmpeg 8. Return to the SHA in `vendor/PINS`. |
 | `git submodule update --recursive` unpinned Moonlight | Sidecar scripts only init submodules when sources are missing. Confirm `./scripts/check-pins.sh`. |
-| Sunshine `cmake --install` wanted `/usr/lib/udev` | The Linux script sets `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside `PREFIX`. |
+| Sunshine `cmake --install` wanted `/usr/lib/udev` | `FindUdev.cmake` ignores `-DUDEV_*` unless patched. Re-run `./scripts/build-sidecars.sh` (it applies `patches/sunshine-udev-prefix.patch` and rewrites `cmake_install.cmake`). Do not `sudo make install`. |
 | Windows `setup-windows.ps1` window closes / UAC flash | Qt 6.8 extra-module names (`qtdeclarative`, `qtsvg`) are in the base kit; passing them as `aqt -m` extras fails immediately. Re-run from a PowerShell prompt (not by double-clicking). Full text: `%TEMP%\eclipse-windows-setup.log`. |
 | Sunshine CMake `Could NOT find OpenSSL` on Windows | Sunshine must be configured with MSYS2 UCRT64, not MSVC. Re-run `.\scripts\setup-windows.ps1` so bootstrap installs MSYS2 + `mingw-w64-ucrt-x86_64-openssl`. Delete `build\sunshine` if it was configured with MSVC. |
 | Sunshine configure stops at `Got from CI ... version` | CMake prints that on stderr. PowerShell `Stop` was treating it as a fatal error. Re-run `.\scripts\setup-windows.ps1`. |
@@ -224,12 +231,13 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
 | Connect hangs then errors on PIN | Host Eclipse/Sunshine must be running; Moonlight pair must reach GameStream ports over Tailscale. |
 | Windows Connect PIN timeout while Linux→Windows works | Moonlight never started (missing Qt/SDL DLLs). Re-run `.\scripts\build-sidecars.ps1` and restart Eclipse. |
-| Moonlight “No video received” / UDP 47998 | Logs show audio + successful UDP tests: not a firewall hole. Check the host Sunshine log for `Couldn't bind RTSP server to port [48010]`; a leftover Sunshine owns the stream. |
+| Moonlight “No video received” / UDP 47998 | See [Video.md](Video.md). Check host Sunshine for `Couldn't bind RTSP server to port [48010]`, `Couldn't import RGB Image: 00003009`, or capture init failure. |
+| Moonlight 503 / KMS `CAP_SYS_ADMIN` | `capture = kms` without setcap. `./scripts/linux-host-perms.sh` or `--reset-capture`. |
 
 ---
 
 ## Next product work (not done)
 
-- Installer matrix and Linux post-install `input` group / udev
+- Installer matrix and Linux package `postinst` (`input` group / udev / setcap). Source builds use `scripts/linux-host-perms.sh`.
 - Windows: Sunshine as a service + `requireAdministrator` (see architecture spec)
 - Optional prompt when the host uses a custom Sunshine password

@@ -1,6 +1,6 @@
 # Architecture Specification: Unified Peer-to-Peer Remote Desktop Node
 
-How to prepare a machine and run the current tree: [User_Guide.md](User_Guide.md) (users) and [Development.md](Development.md) (developers). This document is the product design. Sections marked **Planned** are not in the tree yet.
+How to prepare a machine and run the current tree: [User_Guide.md](User_Guide.md) (users), [Development.md](Development.md) (developers), and [Video.md](Video.md) (capture/encode/smoke). This document is the product design. Sections marked **Planned** are not in the tree yet.
 
 ## Implementation status
 
@@ -19,7 +19,7 @@ Bootstrap as of 2026-08-24, first verified on Omarchy (Arch) Linux with an AMD R
 | One-click Connect, automated PIN pairing, spawn Moonlight | Implemented |
 | GitHub Actions `.msi` / `.deb` / `.rpm` installers | Planned |
 | Windows Sunshine-as-service + `requireAdministrator` | Planned |
-| Linux post-install `input` group / udev into `/usr` | Planned |
+| Linux post-install `input` group / udev into `/usr` | Helper: `scripts/linux-host-perms.sh`. Package `postinst` still planned |
 
 Vendored pins are recorded in `vendor/PINS`. `scripts/check-pins.sh` and `.github/workflows/check.yml` enforce those SHAs. Do not check out Moonlight tag `v6.1.0` (it does not build against FFmpeg 8).
 
@@ -116,9 +116,9 @@ Once a session is established, Tauri gets out of the way. The raw data pipeline 
 
 ### 5.1 Video Pipeline
 
-1. **Host Capture:** Sunshine uses OS-level zero-copy APIs:
+1. **Host Capture:** Sunshine uses OS-level zero-copy APIs. Capture stays on **auto** (do not force `capture = kms` in-repo).
    * *Windows:* DXGI Desktop Duplication API.
-   * *Linux:* XDG Desktop Portal + PipeWire (DMA-BUF), and compositor-native Wayland grabbers where available (`wlgrab` was used on Hyprland during bootstrap).
+   * *Linux:* `wlr` / `wlgrab` on Hyprland and other wlroots compositors; XDG Desktop Portal + PipeWire on GNOME/KDE; DRM/KMS as a fallback when the Sunshine binary has `CAP_SYS_ADMIN` (see [Video.md](Video.md)).
 2. **Host Encoding:** The raw frame buffer is passed directly to the GPU's hardware encoder (NVENC, AMD AMF, Intel QuickSync, or Linux VA-API) and compressed into an H.264/H.265 (and AV1 where the GPU supports it) packet.
 3. **Transport:** Sunshine sends the packet via UDP to the Client over Tailscale.
 4. **Client Decoding:** Moonlight receives the packet and uses the Client OS hardware decoder (DXVA2/D3D11VA on Windows, VDPAU/VA-API on Linux).
@@ -132,7 +132,7 @@ CUDA is an optional *build* feature for Sunshine on NVIDIA hosts (`ECLIPSE_CUDA=
 2. **Transport:** Input data is sent via a heavily prioritized, encrypted UDP control channel to the Host.
 3. **Host Injection:** Sunshine parses the input and injects it into the Host OS:
    * *Windows:* Uses the Win32 `SendInput` API.
-   * *Linux:* Uses the kernel-level `uinput` / `evdev` virtual devices. The user must be in the `input` group; local sidecar builds do not install udev rules into `/usr`.
+   * *Linux:* Uses the kernel-level `uinput` / `evdev` virtual devices. `scripts/linux-host-perms.sh` adds the user to `input` and installs udev rules; package postinst is still planned.
 
 ---
 

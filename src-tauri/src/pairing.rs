@@ -7,11 +7,12 @@
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::sidecar::{SUNSHINE, SUNSHINE_UI_PASS, SUNSHINE_UI_USER};
+use crate::sidecar::{probe_tcp, SUNSHINE, SUNSHINE_UI_PASS, SUNSHINE_UI_USER};
 
 const PIN_RETRY: Duration = Duration::from_secs(25);
 const PIN_INTERVAL: Duration = Duration::from_millis(300);
 const PIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const RTSP_PORT: u16 = 48010;
 
 const CLIENT_NAME: &str = "Eclipse";
 
@@ -38,23 +39,55 @@ impl PinError {
 }
 
 pub fn pin_url(host: &str) -> String {
-    let port = SUNSHINE.health().map(|h| h.port).unwrap_or(47990);
-    format!("https://{host}:{port}/api/pin")
+    format!("https://{host}:{}/api/pin", sunshine_ui_port())
 }
 
 pub fn logs_url(host: &str) -> String {
-    let port = SUNSHINE.health().map(|h| h.port).unwrap_or(47990);
-    format!("https://{host}:{port}/api/logs")
+    format!("https://{host}:{}/api/logs", sunshine_ui_port())
 }
 
-/// True when the most recent Sunshine process logged that RTSP 48010 was taken.
-/// Pairing can still work on :47990 while Moonlight streams to a leftover host on :48010.
-pub fn host_rtsp_bind_failed(log: &str) -> bool {
-    let slice = log
-        .rfind("Sunshine version:")
+fn sunshine_ui_port() -> u16 {
+    SUNSHINE.health().map(|h| h.port).unwrap_or(47990)
+}
+
+fn latest_sunshine_log(log: &str) -> &str {
+    log.rfind("Sunshine version:")
         .map(|i| &log[i..])
-        .unwrap_or(log);
-    slice.contains("Couldn't bind RTSP server to port")
+        .unwrap_or(log)
+}
+
+#[cfg(test)]
+fn host_rtsp_bind_failed(log: &str) -> bool {
+    latest_sunshine_log(log).contains("Couldn't bind RTSP server to port")
+}
+
+fn host_capture_failed(log: &str) -> bool {
+    let slice = latest_sunshine_log(log);
+    slice.contains("Unable to initialize capture method")
+        || slice.contains("Platform failed to initialize")
+        || slice.contains("Unable to find display or encoder")
+        || slice.contains("Video failed to find working encoder")
+}
+
+fn host_kms_missing_caps(log: &str) -> bool {
+    let slice = latest_sunshine_log(log);
+    slice.contains("config: 'capture' = kms") && slice.contains("Failed to gain CAP_SYS_ADMIN")
+}
+
+/// Fail Connect on capture/encoder problems. An RTSP bind log line alone is
+/// not enough: Sunshine often logs that after it already owns :48010.
+pub fn host_video_issue(log: &str) -> Option<&'static str> {
+    if host_kms_missing_caps(log) {
+        Some(
+            "Host Sunshine capture is KMS but lacks CAP_SYS_ADMIN. On Linux run ./scripts/linux-host-perms.sh (then restart Eclipse), or ./scripts/linux-host-perms.sh --reset-capture to use auto/wlr. See docs/Video.md.",
+        )
+    } else if host_capture_failed(log) {
+        Some(
+            "Host Sunshine could not initialize video capture/encoding. See docs/Video.md. On Linux run ./scripts/linux-host-perms.sh and rebuild sidecars; on Windows run .\\scripts\\windows-firewall.ps1 and confirm GPU drivers.",
+        )
+    } else {
+        None
+    }
 }
 
 pub fn pin_payload(pin: &str, name: &str) -> serde_json::Value {
@@ -143,8 +176,8 @@ pub fn submit_pin_until_accepted(host: &str, pin: &str, name: &str) -> Result<()
     retry_until_ok(|| submit_pin(host, pin, name), PIN_RETRY, PIN_INTERVAL)
 }
 
-/// GET `/api/logs` and fail Connect when the host Sunshine never bound RTSP.
-pub fn ensure_host_rtsp(host: &str) -> Result<(), PinError> {
+/// GET `/api/logs`, then probe TCP 48010. Log text can lie about RTSP bind.
+pub fn ensure_host_video(host: &str) -> Result<(), PinError> {
     let client = http_client()?;
     let response = client
         .get(logs_url(host))
@@ -161,9 +194,12 @@ pub fn ensure_host_rtsp(host: &str) -> Result<(), PinError> {
     let text = response
         .text()
         .map_err(|err| PinError::Other(format!("Host log fetch was not text: {err}")))?;
-    if host_rtsp_bind_failed(&text) {
+    if let Some(msg) = host_video_issue(&text) {
+        return Err(PinError::Other(msg.into()));
+    }
+    if !probe_tcp(host, RTSP_PORT, Duration::from_millis(500)) {
         return Err(PinError::Other(
-            "Host Sunshine could not bind RTSP port 48010 (already in use). On that PC, stop extra Sunshine processes (distro package or leftover Eclipse) and restart Eclipse.".into(),
+            "Host RTSP port 48010 is not reachable. Stop extra Sunshine processes (distro package or leftover Eclipse) and restart Eclipse.".into(),
         ));
     }
     Ok(())
@@ -195,6 +231,52 @@ Info: Found H.264 encoder: h264_vaapi [vaapi]
 Fatal: Couldn't bind RTSP server to port [48010], Address already in use
 ";
         assert!(host_rtsp_bind_failed(log));
+    }
+
+    #[test]
+    fn host_video_issue_ignores_rtsp_log_when_encoder_came_up() {
+        let log = "\
+Sunshine version: 0.0.0
+Info: Found H.264 encoder: h264_vaapi [vaapi]
+Fatal: Couldn't bind RTSP server to port [48010], Address already in use
+Info: Starting main loop
+";
+        assert!(host_rtsp_bind_failed(log));
+        assert!(host_video_issue(log).is_none());
+    }
+
+    #[test]
+    fn host_kms_missing_caps_requires_kms_config_and_setcap_failure() {
+        let kms = "\
+Sunshine version: 0.0.0
+config: 'capture' = kms
+Error: Failed to gain CAP_SYS_ADMIN
+Error: Unable to initialize capture method
+";
+        assert!(host_kms_missing_caps(kms));
+        assert!(host_capture_failed(kms));
+        let msg = host_video_issue(kms).expect("kms without caps is a video issue");
+        assert!(msg.contains("linux-host-perms.sh"));
+
+        let wlr = "\
+Sunshine version: 0.0.0
+Info: Found H.264 encoder: h264_vaapi [vaapi]
+";
+        assert!(!host_kms_missing_caps(wlr));
+        assert!(!host_capture_failed(wlr));
+        assert!(host_video_issue(wlr).is_none());
+    }
+
+    #[test]
+    fn host_capture_failed_ignores_older_sunshine_instance() {
+        let log = "\
+Sunshine version: old
+Unable to initialize capture method
+Sunshine version: new
+Info: Found H.264 encoder: h264_vaapi [vaapi]
+";
+        assert!(!host_capture_failed(log));
+        assert!(host_video_issue(log).is_none());
     }
 
     #[test]

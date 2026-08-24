@@ -2,7 +2,7 @@
 
 Eclipse is a peer-to-peer remote desktop node. One install is both a **host** (this PC can be controlled) and a **client** (this PC can control another). The window you see is the control plane; Sunshine and Moonlight do the actual capture, encode, decode, and input.
 
-There are **no published installers yet**. Until GitHub Actions ships `.deb` / `.rpm` / `.msi` packages, running Eclipse means building it from source. That is the same path as [Development.md](Development.md), with the runtime notes below.
+There are **no published installers yet**. Until GitHub Actions ships `.deb` / `.rpm` / `.msi` packages, running Eclipse means building it from source. That is the same path as [Development.md](Development.md), with the runtime notes below. Video capture, encode, and smoke tests: [Video.md](Video.md).
 
 ## What works today
 
@@ -14,7 +14,7 @@ There are **no published installers yet**. Until GitHub Actions ships `.deb` / `
 
 ## What is not built yet
 
-- Packaged installers and post-install permission scripts
+- Packaged installers (Linux host perms are [`scripts/linux-host-perms.sh`](../scripts/linux-host-perms.sh) until packages ship)
 - Prompting for a custom Sunshine Web UI password (Connect expects the seeded `eclipse` / `eclipse` credentials)
 
 Two Eclipse machines on the same tailnet can Connect. The host must be running Eclipse (Sunshine up). Linux input injection still needs the `input` group.
@@ -54,24 +54,23 @@ On Windows, use the vendor's current Game Ready / Adrenalin / Arc driver.
 
 ### Capture and audio (Linux)
 
-Sunshine captures via the session compositor:
+Sunshine captures via the session compositor. Details and smoke scripts: [Video.md](Video.md).
 
-- **Wayland:** PipeWire / desktop portal, or Sunshine's native `wlgrab` backend (wlr-screencopy; used on Hyprland during bootstrap).
+- **Wayland:** PipeWire / desktop portal, or Sunshine's native `wlgrab` backend (wlr-screencopy; used on Hyprland). Keep capture on **auto**. KMS is a fallback that needs `linux-host-perms.sh`.
 - **X11:** X11 capture APIs.
+- **Windows:** DXGI Desktop Duplication (no KMS).
 
 PipeWire and a working desktop session are required. Headless machines without a graphical session cannot host a desktop stream.
 
 ### Keyboard and mouse injection (Linux hosts)
 
-Sunshine injects input through `/dev/uinput`. Official Sunshine packages create the `input` group and install udev rules. Eclipse's local sidecar build **does not** install those rules into `/usr`.
+Sunshine injects input through `/dev/uinput`. Official Sunshine packages create the `input` group and install udev rules. For a source build, [`scripts/linux-host-perms.sh`](../scripts/linux-host-perms.sh) installs those rules into `/etc` and sets file capabilities. CMake install still writes udev/systemd units only into `src-tauri/resources/sunshine-prefix/`.
 
 On a Linux host you will use for remote control:
 
 ```bash
-sudo groupadd -f input
-sudo usermod -aG input "$USER"
-# After the next login:
-id -nG | grep -qw input && echo "input group: ok"
+./scripts/linux-host-perms.sh
+./scripts/linux-host-perms.sh --status
 ```
 
 Log out of the desktop session (or reboot) so the new group applies. Without this, video may work while mouse and keyboard on the remote PC do not.
@@ -138,7 +137,7 @@ First run can take a long time: Visual Studio Build Tools, Qt 6, and (on NVIDIA 
 This section is the intended user path. It is not available yet.
 
 1. Install Tailscale and complete `tailscale up`.
-2. On Linux, ensure your user is in the `input` group (a post-install script is planned to do this).
+2. On Linux, run `./scripts/linux-host-perms.sh` (a post-install script is planned to do this in packages).
 3. Install the Eclipse package for your OS and open **Eclipse**.
 4. Pick a peer and click **Connect**.
 
@@ -157,9 +156,11 @@ This section is the intended user path. It is not available yet.
 | Peers says Tailscale is not installed / not running | Install Tailscale and run `tailscale up`. Eclipse does not log you in. |
 | Peer is on the tailnet but “No Sunshine” | The other PC is not running Eclipse, or Sunshine is not listening on `:47990`. On Windows, confirm `https://localhost:47990` loads on the host; if it does not, restart Eclipse so the sidecar can stage `share/sunshine` and stay up. Windows Firewall may still block inbound GameStream ports on the Tailscale adapter. |
 | Connect says PIN was not accepted before timeout | On Windows, Moonlight needs Qt/SDL/FFmpeg DLLs next to it — rebuild sidecars and restart Eclipse. On either OS, the host PC must be running Eclipse and GameStream ports must be reachable over Tailscale. |
-| Moonlight: “No video received from host” / UDP 47998, 48000 | Official Moonlight wiki black-screen steps are for NVIDIA GameStream. If audio arrived, UDP is open. On Linux this is often a second Sunshine holding RTSP `48010` while Eclipse owns `47990`. On the host: `ss -tlnp \| grep 48010`, stop distro Sunshine / extra Eclipse, restart Eclipse, then Connect again. |
+| Moonlight: “No video received from host” / UDP 47998, 48000 | See [Video.md](Video.md). If audio arrived, UDP is open. Check the host Sunshine log for extra Sunshine on RTSP `48010`, `Couldn't import RGB Image: 00003009` (rebuild sidecars), or capture init failure. |
+| Moonlight error 503 / “Failed to initialise video capture/encoding” | Host capture never started. If `capture = kms`, run `./scripts/linux-host-perms.sh` or `--reset-capture`. See [Video.md](Video.md). |
+| Linux: `Couldn't import RGB Image: 00003009` | EGL DMA-BUF import failed on `wlr`. Rebuild sidecars so `patches/sunshine-egl-bad-match.patch` is applied. Do not force KMS unless `wlr` still fails. |
 | Two copies of Sunshine | Uninstall distro Sunshine / close the other Eclipse window. GameStream RTSP is port `48010`; the Web UI is `47990`. Both must be the same process. |
 | Connect says the host uses a custom Web UI password | That PC set a Sunshine password other than `eclipse` / `eclipse`. Eclipse does not prompt for it this version. |
-| Connect opens Moonlight but input does not work (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |
-| Video works, input does not (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |
+| Connect opens Moonlight but input does not work (Linux) | Run `./scripts/linux-host-perms.sh`, then log out so the `input` group applies. Confirm `/dev/uinput` is writable. |
+| Video works, input does not (Linux) | Same as above: `input` group and `/dev/uinput`. |
 

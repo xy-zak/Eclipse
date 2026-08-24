@@ -45,6 +45,12 @@ try {
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         throw "build-sidecars.ps1 exited $LASTEXITCODE"
     }
+
+    & (Join-Path $PSScriptRoot "windows-firewall.ps1")
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "windows-firewall.ps1 exited $LASTEXITCODE"
+    }
+
     npm install
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         throw "npm install exited $LASTEXITCODE"
@@ -53,6 +59,7 @@ try {
     Write-Host ""
     Write-Host "Setup complete. Start the app with:"
     Write-Host "  npm run tauri -- dev"
+    Write-Host "Video smoke: .\scripts\smoke-video.ps1 loopback   (see docs/Video.md)"
 } catch {
     Show-EclipseFailure $_.Exception.Message
     exit 1

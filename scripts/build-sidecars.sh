@@ -71,6 +71,45 @@ if [[ ! -f "${SUNSHINE_SRC}/.git" && ! -d "${SUNSHINE_SRC}/.git" ]]; then
   git -C "${ROOT}" submodule update --init --recursive
 fi
 
+apply_sunshine_patches() {
+  local patch
+  shopt -s nullglob
+  local found=0
+  for patch in "${ROOT}/patches/sunshine-"*.patch; do
+    found=1
+    if git -C "${SUNSHINE_SRC}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
+      echo "Already applied $(basename "${patch}")"
+      continue
+    fi
+    echo "==> Applying $(basename "${patch}")"
+    git -C "${SUNSHINE_SRC}" apply --whitespace=nowarn "${patch}"
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    echo "No patches/sunshine-*.patch files found" >&2
+    exit 1
+  fi
+}
+
+# Sunshine FindUdev/FindSystemd write absolute /usr destinations; keep them in PREFIX.
+keep_sunshine_install_in_prefix() {
+  local inst="${BUILD_SUN}/cmake_install.cmake"
+  [[ -f "${inst}" ]] || return 0
+  mkdir -p \
+    "${PREFIX}/lib/udev/rules.d" \
+    "${PREFIX}/lib/systemd/user" \
+    "${PREFIX}/lib/modules-load.d"
+  if grep -qE '/usr/lib/(udev/rules\.d|systemd/user|modules-load\.d)' "${inst}"; then
+    echo "==> Redirecting Sunshine udev/systemd install into ${PREFIX}"
+    sed -i \
+      -e "s#/usr/lib/udev/rules.d#${PREFIX}/lib/udev/rules.d#g" \
+      -e "s#/usr/lib/systemd/user#${PREFIX}/lib/systemd/user#g" \
+      -e "s#/usr/lib/modules-load.d#${PREFIX}/lib/modules-load.d#g" \
+      "${inst}"
+  fi
+}
+
+apply_sunshine_patches
+
 mkdir -p "${BIN_DIR}" "${ASSET_DIR}" "${BUILD_SUN}" "${BUILD_MOON}" "${PREFIX}"
 
 echo "==> Configuring Sunshine"
@@ -92,6 +131,7 @@ cmake -S "${SUNSHINE_SRC}" -B "${BUILD_SUN}" -G Ninja \
 echo "==> Building Sunshine"
 cmake --build "${BUILD_SUN}"
 # Sunshine also tries to install udev/systemd units; keep those inside PREFIX.
+keep_sunshine_install_in_prefix
 cmake --install "${BUILD_SUN}"
 
 SUN_BIN="$(find "${PREFIX}" "${BUILD_SUN}" -type f -name sunshine -perm /111 | head -n 1)"

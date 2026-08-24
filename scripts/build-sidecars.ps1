@@ -92,6 +92,28 @@ if (-not (Test-Path (Join-Path $SunshineSrc "CMakeLists.txt"))) {
     throw "Vendored engines missing. git submodule update --init --recursive (do not checkout Moonlight v6.1.0)"
 }
 
+function Apply-SunshinePatches {
+    $patchDir = Join-Path $Root "patches"
+    $patches = @(Get-ChildItem $patchDir -Filter "sunshine-*.patch" -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($patches.Count -eq 0) {
+        throw "No patches/sunshine-*.patch files found"
+    }
+    foreach ($patch in $patches) {
+        git -C $SunshineSrc apply --reverse --check $patch.FullName 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Already applied $($patch.Name)"
+            continue
+        }
+        Write-Host "==> Applying $($patch.Name)"
+        git -C $SunshineSrc apply --whitespace=nowarn $patch.FullName
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "git apply failed for $($patch.Name) (exit $LASTEXITCODE)"
+        }
+    }
+}
+
+Apply-SunshinePatches
+
 $Triple = (rustc --print host-tuple).Trim()
 Write-Host "Host triple: $Triple"
 

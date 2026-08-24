@@ -1,0 +1,67 @@
+diff --git i/cmake/FindSystemd.cmake w/cmake/FindSystemd.cmake
+index b8d9fb7e..9ea4226b 100644
+--- i/cmake/FindSystemd.cmake
++++ w/cmake/FindSystemd.cmake
+@@ -14,20 +14,26 @@ IF (NOT WIN32)
+     endif()
+ 
+     if (SYSTEMD_FOUND)
+-        execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
+-            --variable=systemd_user_unit_dir systemd
+-            OUTPUT_STRIP_TRAILING_WHITESPACE
+-            OUTPUT_VARIABLE SYSTEMD_USER_UNIT_INSTALL_DIR)
++        if(NOT SYSTEMD_USER_UNIT_INSTALL_DIR)
++            execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
++                --variable=systemd_user_unit_dir systemd
++                OUTPUT_STRIP_TRAILING_WHITESPACE
++                OUTPUT_VARIABLE SYSTEMD_USER_UNIT_INSTALL_DIR)
++        endif()
+ 
+-        execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
+-            --variable=systemd_system_unit_dir systemd
+-            OUTPUT_STRIP_TRAILING_WHITESPACE
+-            OUTPUT_VARIABLE SYSTEMD_SYSTEM_UNIT_INSTALL_DIR)
++        if(NOT SYSTEMD_SYSTEM_UNIT_INSTALL_DIR)
++            execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
++                --variable=systemd_system_unit_dir systemd
++                OUTPUT_STRIP_TRAILING_WHITESPACE
++                OUTPUT_VARIABLE SYSTEMD_SYSTEM_UNIT_INSTALL_DIR)
++        endif()
+ 
+-        execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
+-            --variable=modules_load_dir systemd
+-            OUTPUT_STRIP_TRAILING_WHITESPACE
+-            OUTPUT_VARIABLE SYSTEMD_MODULES_LOAD_DIR)
++        if(NOT SYSTEMD_MODULES_LOAD_DIR)
++            execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
++                --variable=modules_load_dir systemd
++                OUTPUT_STRIP_TRAILING_WHITESPACE
++                OUTPUT_VARIABLE SYSTEMD_MODULES_LOAD_DIR)
++        endif()
+ 
+         mark_as_advanced(
+                 SYSTEMD_USER_UNIT_INSTALL_DIR
+diff --git i/cmake/FindUdev.cmake w/cmake/FindUdev.cmake
+index 35b03ce7..89c469e4 100644
+--- i/cmake/FindUdev.cmake
++++ w/cmake/FindUdev.cmake
+@@ -20,12 +20,14 @@ if(NOT WIN32)
+             set(UDEV_VERSION "0")
+         endif()
+ 
+-        execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
+-            --variable=udev_dir udev
+-            OUTPUT_STRIP_TRAILING_WHITESPACE
+-            OUTPUT_VARIABLE UDEV_RULES_INSTALL_DIR)
++        if(NOT UDEV_RULES_INSTALL_DIR)
++            execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
++                --variable=udev_dir udev
++                OUTPUT_STRIP_TRAILING_WHITESPACE
++                OUTPUT_VARIABLE UDEV_RULES_INSTALL_DIR)
+ 
+-        set(UDEV_RULES_INSTALL_DIR "${UDEV_RULES_INSTALL_DIR}/rules.d")
++            set(UDEV_RULES_INSTALL_DIR "${UDEV_RULES_INSTALL_DIR}/rules.d")
++        endif()
+ 
+         mark_as_advanced(UDEV_RULES_INSTALL_DIR)
+ 
