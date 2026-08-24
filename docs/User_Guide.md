@@ -148,7 +148,8 @@ This section is the intended user path. It is not available yet.
 
 | Symptom | What to check |
 | --- | --- |
-| Host process pill stays off | Sidecars were not built, or Sunshine failed to spawn. Build with `./scripts/build-sidecars.sh` and look at the terminal that launched `npm run tauri -- dev`. |
+| Host process pill stays off | Sidecars were not built, or Sunshine failed to spawn. Build with `./scripts/build-sidecars.sh` (Windows: `.\scripts\build-sidecars.ps1`) and look at the terminal that launched `npm run tauri -- dev`. |
+| Windows setup window closes immediately | Do not double-click the script. From PowerShell in the repo: `.\scripts\setup-windows.ps1`. The UAC helper used to fail on Qt 6.8 extra-module names; the error is also in `%TEMP%\eclipse-windows-setup.log`. |
 | `cargo` / Tauri error about missing `binaries/sunshine` | The sidecar files are gitignored. You must compile them on this machine (or copy the correctly named triple-suffixed binaries into `src-tauri/binaries/`). |
 | No hardware encoders | `vainfo` on Linux; GPU drivers on Windows. AMD on this project used Mesa VA-API (`h264_vaapi` / `hevc_vaapi` / `av1_vaapi`), not CUDA. |
 | Browser warning on port 47990 | Expected. Sunshine uses a self-signed certificate. |

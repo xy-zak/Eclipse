@@ -63,11 +63,11 @@ If an NVIDIA GPU is present (and `ECLIPSE_CUDA` is not `off`), bootstrap also in
 
 ### Windows 11 packages
 
-`scripts/bootstrap.ps1` **installs** missing tools (self-elevates once via UAC). Cold install is large: VS 2022 Build Tools, Qt 6 MSVC via aqtinstall, and CUDA toolkit on NVIDIA machines.
+`scripts/bootstrap.ps1` **installs** missing tools (self-elevates once via UAC). Cold install is large: VS 2022 Build Tools, Qt 6 MSVC via aqtinstall, CUDA toolkit on NVIDIA machines, and **MSYS2 UCRT64** for Sunshine.
 
-It uses `winget` for Git, Node LTS, CMake, Ninja, rustup, and VS Build Tools (C++ workload); Python + aqtinstall for Qt 6.8.3 MSVC; `Nvidia.CUDA` when an NVIDIA GPU is present. Skip CUDA with `ECLIPSE_CUDA=off`. It does **not** install the Game Ready driver.
+It uses `winget` for Git, Node LTS, CMake, Ninja, rustup, VS Build Tools (C++ workload), and MSYS2; Python + aqtinstall for Qt 6.8.3 MSVC (Moonlight); `Nvidia.CUDA` when an NVIDIA GPU is present. Sunshine on Windows is **not** an MSVC build — LizardByte compiles it with MinGW UCRT64 (`mingw-w64-ucrt-x86_64-openssl` and related pacman packages). Skip CUDA with `ECLIPSE_CUDA=off`. It does **not** install the Game Ready driver.
 
-`scripts/windows-dev-env.ps1` refreshes PATH and imports VsDevCmd so you do not need a Developer Prompt. `build-sidecars.ps1` dot-sources it and fetches Moonlight's Windows prebuilts (`setup-deps.ps1`) when needed.
+`scripts/windows-dev-env.ps1` refreshes PATH, imports VsDevCmd, and locates MSYS2. `build-sidecars.ps1` builds Sunshine inside UCRT64 and Moonlight with MSVC `nmake`.
 
 ```powershell
 .\scripts\setup-windows.ps1     # bootstrap + sidecars + npm install
@@ -211,7 +211,10 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | Moonlight fails on `pix_fmts` / Vulkan hwcontext | You are on Moonlight `v6.1.0` + FFmpeg 8. Return to the SHA in `vendor/PINS`. |
 | `git submodule update --recursive` unpinned Moonlight | Sidecar scripts only init submodules when sources are missing. Confirm `./scripts/check-pins.sh`. |
 | Sunshine `cmake --install` wanted `/usr/lib/udev` | The Linux script sets `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside `PREFIX`. |
-| CUDA build on a machine without `nvcc` | Default is `ECLIPSE_CUDA=auto`. Bootstrap installs the toolkit when an NVIDIA GPU is present. Set `ECLIPSE_CUDA=off` to skip. Do not set `on` unless the toolkit is installed. |
+| Windows `setup-windows.ps1` window closes / UAC flash | Qt 6.8 extra-module names (`qtdeclarative`, `qtsvg`) are in the base kit; passing them as `aqt -m` extras fails immediately. Re-run from a PowerShell prompt (not by double-clicking). Full text: `%TEMP%\eclipse-windows-setup.log`. |
+| Sunshine CMake `Could NOT find OpenSSL` on Windows | Sunshine must be configured with MSYS2 UCRT64, not MSVC. Re-run `.\scripts\setup-windows.ps1` so bootstrap installs MSYS2 + `mingw-w64-ucrt-x86_64-openssl`. Delete `build\sunshine` if it was configured with MSVC. |
+| Sunshine configure stops at `Got from CI ... version` | CMake prints that on stderr. PowerShell `Stop` was treating it as a fatal error. Re-run `.\scripts\setup-windows.ps1`. |
+| `MISSING nmake (VsDevCmd)` after VS is installed | `windows-dev-env.ps1` must not reset PATH after importing VsDevCmd. Open a new PowerShell and re-run `.\scripts\setup-windows.ps1`. |
 | Port 47990 in use | Another Eclipse/Sunshine still running. Close the previous window. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |

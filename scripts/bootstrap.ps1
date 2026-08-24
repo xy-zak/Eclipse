@@ -1,6 +1,8 @@
 # Install the Windows 11 toolchain for Eclipse sidecar + Tauri builds.
-# Self-elevates once (UAC). Idempotent. CUDA toolkit is installed only when an NVIDIA GPU is present
-# unless ECLIPSE_CUDA=off. Does not install the NVIDIA Game Ready driver.
+# Self-elevates once via UAC. Idempotent.
+# CUDA toolkit is installed only when an NVIDIA GPU is present unless ECLIPSE_CUDA=off.
+# Sunshine is compiled with MSYS2 UCRT64 (OpenSSL and friends). Moonlight uses MSVC + Qt.
+# Does not install the NVIDIA Game Ready driver.
 param(
     [switch]$Elevated
 )
@@ -10,6 +12,30 @@ $ErrorActionPreference = "Stop"
 $QtVersion = "6.8.3"
 $QtArch = "win64_msvc2022_64"
 $QtRoot = Join-Path $env:LOCALAPPDATA "Eclipse\Qt"
+$EclipseLog = Join-Path $env:TEMP "eclipse-windows-setup.log"
+
+function Test-ShouldPauseOnError {
+    if ($env:ECLIPSE_NO_PAUSE) { return $false }
+    if ($env:CI) { return $false }
+    try {
+        $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+        $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$parentId" -ErrorAction Stop).Name
+        return $parent -match "explorer|Consent|ApplicationFrameHost|sihost|svchost"
+    } catch {
+        return $false
+    }
+}
+
+function Show-EclipseFailure {
+    param([string]$Message)
+    Write-Host ""
+    Write-Host $Message -ForegroundColor Red
+    Write-Host "Log: $EclipseLog"
+    if (Test-ShouldPauseOnError) {
+        Write-Host "Press Enter to close this window."
+        try { Read-Host | Out-Null } catch { }
+    }
+}
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -136,7 +162,27 @@ function Install-QtMsvc {
     Update-SessionPath
     Write-Host "  aqt install-qt $QtVersion $QtArch (several GB)..."
     New-Item -ItemType Directory -Force -Path $QtRoot | Out-Null
-    python -m aqt install-qt windows desktop $QtVersion $QtArch --outputdir $QtRoot -m qtshadertools qtdeclarative qtsvg
+    # Qt 6.8 ships qtdeclarative/qtsvg in the base kit. Passing them as -m extras
+    # makes aqt fail immediately ("packages were not found while parsing XML").
+    $wanted = @("qtshadertools", "qtdeclarative", "qtsvg", "qtimageformats")
+    $listed = python -m aqt list-qt windows desktop --modules $QtVersion $QtArch
+    if ($LASTEXITCODE -ne 0) {
+        throw "aqt list-qt failed for $QtVersion $QtArch"
+    }
+    $available = @($listed -split "\s+" | Where-Object { $_ })
+    $mods = @($wanted | Where-Object { $available -contains $_ })
+    $aqtArgs = @(
+        "-m", "aqt", "install-qt", "windows", "desktop", $QtVersion, $QtArch,
+        "--outputdir", $QtRoot
+    )
+    if ($mods.Count -gt 0) {
+        Write-Host "  extra Qt modules: $($mods -join ', ')"
+        $aqtArgs += @("-m") + $mods
+    }
+    python @aqtArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "aqt install-qt failed (exit $LASTEXITCODE). See $EclipseLog"
+    }
     $qmakePath = Join-Path $QtRoot "$QtVersion\msvc2022_64\bin"
     if (-not (Test-Path (Join-Path $qmakePath "qmake.exe"))) {
         throw "Qt install finished but qmake.exe was not found at $qmakePath"
@@ -181,6 +227,60 @@ function Install-CudaToolkit {
     Update-SessionPath
 }
 
+function Install-Msys2SunshineDeps {
+    . (Join-Path $PSScriptRoot "windows-dev-env.ps1")
+    $root = Get-EclipseMsys2Root
+    $bash = Join-Path $root "usr\bin\bash.exe"
+    if (-not (Test-Path $bash)) {
+        Write-Host "  Installing MSYS2 (Sunshine on Windows needs UCRT64, not MSVC)..."
+        Install-WingetPackage -Id "MSYS2.MSYS2"
+        Start-Sleep -Seconds 2
+        $root = Get-EclipseMsys2Root
+        $bash = Join-Path $root "usr\bin\bash.exe"
+        if (-not (Test-Path $bash)) {
+            throw "MSYS2 install finished but bash.exe was not found at $bash"
+        }
+    } else {
+        Write-Host "  OK  MSYS2"
+    }
+
+    if (Test-EclipseMsys2SunshineDeps) {
+        Write-Host "  OK  MSYS2 UCRT64 OpenSSL / gcc"
+        return
+    }
+
+    Write-Host "  pacman -Syuu (MSYS2 core)..."
+    for ($i = 0; $i -lt 3; $i++) {
+        $code = Invoke-EclipseMsys2 -PassThru -Command "pacman -Syuu --noconfirm"
+        if ($code -eq 0) { break }
+        Write-Host "  pacman core update pass $($i + 1) exited $code (retrying is normal)"
+    }
+
+    # Do not install the "toolchain" group: pacman still prompts for member
+    # selection even with --noconfirm. gcc pulls in crt/headers/binutils.
+    # MinHook's package name is case-sensitive on the UCRT64 repo.
+    $pkgs = @(
+        "mingw-w64-ucrt-x86_64-gcc",
+        "mingw-w64-ucrt-x86_64-cmake",
+        "mingw-w64-ucrt-x86_64-ninja",
+        "mingw-w64-ucrt-x86_64-pkgconf",
+        "mingw-w64-ucrt-x86_64-openssl",
+        "mingw-w64-ucrt-x86_64-curl-winssl",
+        "mingw-w64-ucrt-x86_64-miniupnpc",
+        "mingw-w64-ucrt-x86_64-opus",
+        "mingw-w64-ucrt-x86_64-boost",
+        "mingw-w64-ucrt-x86_64-nlohmann-json",
+        "mingw-w64-ucrt-x86_64-onevpl",
+        "mingw-w64-ucrt-x86_64-cppwinrt",
+        "mingw-w64-ucrt-x86_64-MinHook"
+    )
+    Write-Host "  pacman -S Sunshine UCRT64 deps..."
+    Invoke-EclipseMsys2 -Command ("pacman -S --needed --noconfirm " + ($pkgs -join " "))
+    if (-not (Test-EclipseMsys2SunshineDeps)) {
+        throw "MSYS2 UCRT64 OpenSSL/gcc still missing after pacman. See $EclipseLog"
+    }
+}
+
 function Assert-Toolchain {
     . (Join-Path $PSScriptRoot "windows-dev-env.ps1")
     $ok = $true
@@ -218,6 +318,12 @@ function Assert-Toolchain {
     } else {
         Write-Host "  CUDA  nvcc not found (Sunshine CUDA will be OFF unless ECLIPSE_CUDA=on)"
     }
+    if (Test-EclipseMsys2SunshineDeps) {
+        Write-Host "  OK  MSYS2 UCRT64 OpenSSL / gcc"
+    } else {
+        Write-Host "  MISSING  MSYS2 UCRT64 OpenSSL / gcc"
+        $ok = $false
+    }
     if (-not $ok) {
         throw "Bootstrap finished but required tools are still missing. Open a new PowerShell and re-run."
     }
@@ -231,24 +337,59 @@ if (-not (Test-Admin)) {
     Write-Host "Eclipse Windows bootstrap needs Administrator once (UAC) to install VS Build Tools / CUDA / packages."
     $cwd = $PWD.Path -replace "'", "''"
     $self = $PSCommandPath -replace "'", "''"
+    $log = $EclipseLog -replace "'", "''"
     $cuda = [string]$env:ECLIPSE_CUDA
+    $pause = [string]$env:ECLIPSE_NO_PAUSE
     $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-Command",
-        "Set-Location '$cwd'; `$env:ECLIPSE_CUDA='$cuda'; & '$self' -Elevated; exit `$LASTEXITCODE"
+        @"
+`$ErrorActionPreference = 'Stop'
+`$env:ECLIPSE_CUDA = '$cuda'
+`$env:ECLIPSE_NO_PAUSE = '$pause'
+try {
+    Start-Transcript -Path '$log' -Force | Out-Null
+    Set-Location '$cwd'
+    & '$self' -Elevated
+    `$code = [int]`$LASTEXITCODE
+    Stop-Transcript | Out-Null
+    exit `$code
+} catch {
+    try { Stop-Transcript | Out-Null } catch {}
+    Write-Host `$_ -ForegroundColor Red
+    Write-Host "Log: $log"
+    if (-not `$env:ECLIPSE_NO_PAUSE) {
+        Read-Host 'Press Enter to close this window' | Out-Null
+    }
+    exit 1
+}
+"@
     )
     if ($p.ExitCode -ne 0) {
+        Write-Host ""
+        Write-Host "Elevated bootstrap failed (exit $($p.ExitCode))." -ForegroundColor Red
+        if (Test-Path $EclipseLog) {
+            Write-Host "----- $EclipseLog -----"
+            Get-Content $EclipseLog | Write-Host
+            Write-Host "----- end log -----"
+        }
+        Show-EclipseFailure "Fix the error above, then re-run scripts/setup-windows.ps1 from PowerShell (not by double-clicking)."
         exit $p.ExitCode
     }
     Write-Host "Installers finished. Refreshing this session..."
-    Assert-Toolchain
+    try {
+        Assert-Toolchain
+    } catch {
+        Show-EclipseFailure $_.Exception.Message
+        exit 1
+    }
     Write-Host "Bootstrap finished."
     exit 0
 }
 
 Write-Host "Eclipse Windows bootstrap (installs missing tools)"
-Write-Host "VS Build Tools, Qt, and CUDA are large downloads. ECLIPSE_CUDA=off skips CUDA."
+Write-Host "VS Build Tools, Qt, CUDA, and MSYS2 UCRT64 (Sunshine) are large downloads. ECLIPSE_CUDA=off skips CUDA."
 Write-Host "This script does not install the NVIDIA Game Ready driver."
 
 Update-SessionPath
@@ -279,6 +420,7 @@ if (-not (Test-Msvc)) {
 
 Install-QtMsvc
 Install-CudaToolkit
+Install-Msys2SunshineDeps
 
 if ($Elevated) {
     # Parent non-admin process will verify after PATH refresh.
@@ -286,6 +428,11 @@ if ($Elevated) {
     exit 0
 }
 
-Assert-Toolchain
-if (Test-Cmd "rustup") { rustup default stable | Out-Host }
-Write-Host "Bootstrap finished."
+try {
+    Assert-Toolchain
+    if (Test-Cmd "rustup") { rustup default stable | Out-Host }
+    Write-Host "Bootstrap finished."
+} catch {
+    Show-EclipseFailure $_.Exception.Message
+    exit 1
+}
