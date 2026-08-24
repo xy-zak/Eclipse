@@ -144,7 +144,7 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
 
 ### 6.1 Process Lifecycle Management
 
-* **Startup (implemented):** When Tauri boots, Rust resolves the Sunshine binary (file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`). It spawns it with `std::process::Command` and `SUNSHINE_ASSETS_DIR`. Failure does not abort the UI.
+* **Startup (implemented):** When Tauri boots, Rust resolves the Sunshine binary (file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`). It copies vendored assets to `{exe_dir}/share/sunshine` (the compile-time Windows assets path) and spawns Sunshine with cwd next to the binary. Failure does not abort the UI.
 * **Shutdown (implemented):** On `RunEvent::Exit`, Rust kills the Sunshine child.
 * **API Control (planned):** Tauri communicates with the local Sunshine instance via its REST API (`https://localhost:47990`) to configure resolution limits, framerates, and encoder preferences based on the user's settings in the React UI.
 * **Client Spawning (implemented):** When a connection is requested, Tauri spawns the Moonlight sidecar as `moonlight stream <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop.

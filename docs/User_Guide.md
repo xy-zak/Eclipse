@@ -155,7 +155,7 @@ This section is the intended user path. It is not available yet.
 | Browser warning on port 47990 | Expected. Sunshine uses a self-signed certificate. |
 | Port 47990 already in use | Another Sunshine (or leftover Eclipse) is running. Close Eclipse or stop that process. |
 | Peers says Tailscale is not installed / not running | Install Tailscale and run `tailscale up`. Eclipse does not log you in. |
-| Peer is on the tailnet but “No Sunshine” | The other PC is not running Eclipse, or Sunshine is bound only to localhost. |
+| Peer is on the tailnet but “No Sunshine” | The other PC is not running Eclipse, or Sunshine is not listening on `:47990`. On Windows, confirm `https://localhost:47990` loads on the host; if it does not, restart Eclipse so the sidecar can stage `share/sunshine` and stay up. Windows Firewall may still block inbound GameStream ports on the Tailscale adapter. |
 | Connect says the host uses a custom Web UI password | That PC set a Sunshine password other than `eclipse` / `eclipse`. Eclipse does not prompt for it this version. |
 | Connect opens Moonlight but input does not work (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |
 | Video works, input does not (Linux) | User not in `input` group, or `/dev/uinput` not writable. Log out after `usermod`. |

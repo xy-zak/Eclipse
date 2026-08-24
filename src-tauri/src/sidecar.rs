@@ -1,11 +1,17 @@
 //! Data-plane sidecars. Sunshine and Moonlight are opaque binaries; this module
 //! is the only place that knows their names, asset env, and health port.
 
+use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::Mutex;
 use std::time::Duration;
+
+/// Compile-time Sunshine assets path used by the Windows sidecar build
+/// (`-DSUNSHINE_ASSETS_DIR=share/sunshine`). Sunshine concatenates this with
+/// `/apps.json` in C++; it does not read `SUNSHINE_ASSETS_DIR` from the environment.
+const SUNSHINE_SHARE_REL: &str = "share/sunshine";
 
 /// Contract for a vendored GameStream engine. Engine upgrades should only
 /// require changing these constants (plus the build script), not the UI.
@@ -153,7 +159,8 @@ impl Engine {
     }
 
     pub fn assets_dir(self) -> Option<PathBuf> {
-        self.assets_rel.map(|rel| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel))
+        self.assets_rel
+            .map(|rel| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel))
     }
 
     /// Dev builds copy `externalBin` next to the exe without a triple suffix.
@@ -200,13 +207,20 @@ impl Engine {
             )
         })?;
         let mut cmd = Command::new(&bin);
-        if let (Some(var), Some(dir)) = (self.asset_env, self.assets_dir()) {
-            if dir.is_dir() {
-                cmd.env(var, &dir);
-                if let Some(parent) = bin.parent() {
-                    cmd.current_dir(parent);
+        if let Some(parent) = bin.parent() {
+            if let Some(dir) = self.assets_dir().filter(|d| d.is_dir()) {
+                match stage_sunshine_share(parent, &dir) {
+                    Ok(staged) => {
+                        if let Some(var) = self.asset_env {
+                            cmd.env(var, &staged);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Eclipse: could not stage Sunshine assets ({err})");
+                    }
                 }
             }
+            cmd.current_dir(parent);
         }
         Ok(cmd)
     }
@@ -226,6 +240,48 @@ impl Engine {
     fn spawn(self) -> Result<Child, std::io::Error> {
         self.spawn_args(&[])
     }
+}
+
+/// Recursively copy `src` into `dst`, creating directories as needed.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn paths_same(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Copy vendored Sunshine web/shader assets into `{bin_dir}/share/sunshine`.
+///
+/// Windows Sunshine is built with a cwd-relative assets path. Setting
+/// `SUNSHINE_ASSETS_DIR` in the environment does not override that path.
+fn stage_sunshine_share(bin_dir: &Path, assets: &Path) -> std::io::Result<PathBuf> {
+    if !assets.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Sunshine assets directory is missing",
+        ));
+    }
+    let dest = bin_dir.join(SUNSHINE_SHARE_REL);
+    if paths_same(assets, &dest) {
+        return Ok(dest);
+    }
+    copy_dir_all(assets, &dest)?;
+    Ok(dest)
 }
 
 fn child_alive(child: Option<&mut Child>) -> bool {
@@ -371,6 +427,72 @@ mod tests {
         .unwrap();
         assert!(sunshine_creds_present(&path));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn unique_temp(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    #[test]
+    fn copy_dir_all_copies_nested_files() {
+        let root = unique_temp("eclipse-copy");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("web")).unwrap();
+        std::fs::write(src.join("apps.json"), "{}").unwrap();
+        std::fs::write(src.join("web").join("index.html"), "<html>").unwrap();
+        copy_dir_all(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("apps.json")).unwrap(), "{}");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("web").join("index.html")).unwrap(),
+            "<html>"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_sunshine_share_creates_compile_time_layout() {
+        let root = unique_temp("eclipse-stage");
+        let assets = root.join("resources").join("sunshine");
+        let bin_dir = root.join("debug");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(assets.join("apps.json"), r#"{"apps":[]}"#).unwrap();
+        let dest = stage_sunshine_share(&bin_dir, &assets).unwrap();
+        assert_eq!(dest, bin_dir.join("share").join("sunshine"));
+        assert_eq!(
+            std::fs::read_to_string(dest.join("apps.json")).unwrap(),
+            r#"{"apps":[]}"#
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_sunshine_share_errors_when_assets_missing() {
+        let root = unique_temp("eclipse-stage-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = stage_sunshine_share(&root, &root.join("missing")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_sunshine_share_skips_copy_when_already_in_place() {
+        let root = unique_temp("eclipse-stage-same");
+        let dest = root.join("share").join("sunshine");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("apps.json"), "keep").unwrap();
+        let staged = stage_sunshine_share(root.as_path(), &dest).unwrap();
+        assert_eq!(staged, dest);
+        assert_eq!(std::fs::read_to_string(dest.join("apps.json")).unwrap(), "keep");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

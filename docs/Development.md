@@ -187,7 +187,7 @@ Eclipse/
   vendor/moonlight-qt/          # submodule
 ```
 
-Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream <ip> Desktop`. Sunshine is started only via `Engine` + `std::process::Command` (`SUNSHINE_ASSETS_DIR`, cwd next to the binary). If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
+Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream <ip> Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
 
 Adapter unit tests: `cd src-tauri && cargo test --lib`
 
@@ -216,6 +216,7 @@ ECLIPSE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib sunshine_s
 | Sunshine configure stops at `Got from CI ... version` | CMake prints that on stderr. PowerShell `Stop` was treating it as a fatal error. Re-run `.\scripts\setup-windows.ps1`. |
 | `MISSING nmake (VsDevCmd)` after VS is installed | `windows-dev-env.ps1` must not reset PATH after importing VsDevCmd. Open a new PowerShell and re-run `.\scripts\setup-windows.ps1`. |
 | Port 47990 in use | Another Eclipse/Sunshine still running. Close the previous window. |
+| Windows `https://localhost:47990` empty / `netstat` has no 47990 | Sunshine exited on first start because `share/sunshine/apps.json` was missing beside the exe. Restart Eclipse after a sidecar rebuild so `sidecar.rs` stages that layout. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
 | Connect hangs then errors on PIN | Host Eclipse/Sunshine must be running; Moonlight pair must reach GameStream ports over Tailscale. |
