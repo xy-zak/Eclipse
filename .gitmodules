@@ -1,3 +1,4 @@
+# Required commits: vendor/PINS (scripts/check-pins.sh).
 [submodule "vendor/sunshine"]
 	path = vendor/sunshine
 	url = https://github.com/LizardByte/Sunshine.git

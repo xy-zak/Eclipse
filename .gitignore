@@ -1,0 +1,34 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Sidecar build trees (out of vendor/)
+/build/
+
+# Compiled sidecars and copied Sunshine assets
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+src-tauri/resources/sunshine/*
+!src-tauri/resources/sunshine/.gitkeep
+src-tauri/resources/sunshine-prefix/

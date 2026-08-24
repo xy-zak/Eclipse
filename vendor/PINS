@@ -1,0 +1,4 @@
+# Expected git submodule commits. scripts/check-pins.sh fails if HEAD differs.
+# Update this file in the same change that moves a submodule.
+vendor/sunshine e18a2f9c6218f1612a67c9451740bd2859f6f4c7 v2026.824.30334
+vendor/moonlight-qt d2f6990be699197385a6458e1231d070da83e665 d2f6990b

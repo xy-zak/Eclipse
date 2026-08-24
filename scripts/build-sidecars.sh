@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Build Sunshine and Moonlight and copy Tauri sidecars for this host triple.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# CUDA toolkit bins (bootstrap may have installed nvcc here).
+for _cuda_bin in /usr/local/cuda/bin /opt/cuda/bin /usr/lib/cuda/bin; do
+  if [[ -d "${_cuda_bin}" ]]; then
+    case ":${PATH}:" in
+      *":${_cuda_bin}:"*) ;;
+      *) export PATH="${_cuda_bin}:${PATH}" ;;
+    esac
+  fi
+done
+unset _cuda_bin
+if [[ -f "${HOME}/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "${HOME}/.cargo/env"
+fi
+if [[ -d "${HOME}/.local/bin" ]]; then
+  case ":${PATH}:" in
+    *":${HOME}/.local/bin:"*) ;;
+    *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+  esac
+fi
+
+SUNSHINE_SRC="${ROOT}/vendor/sunshine"
+MOONLIGHT_SRC="${ROOT}/vendor/moonlight-qt"
+BUILD_SUN="${ROOT}/build/sunshine"
+BUILD_MOON="${ROOT}/build/moonlight"
+BIN_DIR="${ROOT}/src-tauri/binaries"
+ASSET_DIR="${ROOT}/src-tauri/resources/sunshine"
+PREFIX="${ROOT}/src-tauri/resources/sunshine-prefix"
+
+need() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required tool: $1" >&2
+    echo "Run scripts/bootstrap.sh first." >&2
+    exit 1
+  fi
+}
+
+need rustc
+need cmake
+need ninja
+need qmake6
+need git
+
+if [[ ! -f "${SUNSHINE_SRC}/CMakeLists.txt" || ! -f "${MOONLIGHT_SRC}/moonlight-qt.pro" ]]; then
+  echo "Vendored engines missing. Clone with: git submodule update --init --recursive" >&2
+  exit 1
+fi
+
+TRIPLE="$(rustc --print host-tuple 2>/dev/null || true)"
+if [[ -z "${TRIPLE}" ]]; then
+  TRIPLE="$(rustc -vV | awk '/^host:/{print $2}')"
+fi
+echo "Host triple: ${TRIPLE}"
+
+CUDA_MODE="${ECLIPSE_CUDA:-auto}"
+USE_CUDA=OFF
+if [[ "${CUDA_MODE}" == "on" ]]; then
+  USE_CUDA=ON
+elif [[ "${CUDA_MODE}" == "auto" ]] && command -v nvcc >/dev/null 2>&1; then
+  USE_CUDA=ON
+fi
+echo "Sunshine CUDA: ${USE_CUDA} (override with ECLIPSE_CUDA=on|off)"
+
+if [[ ! -f "${SUNSHINE_SRC}/.git" && ! -d "${SUNSHINE_SRC}/.git" ]]; then
+  git -C "${ROOT}" submodule update --init --recursive
+fi
+
+mkdir -p "${BIN_DIR}" "${ASSET_DIR}" "${BUILD_SUN}" "${BUILD_MOON}" "${PREFIX}"
+
+echo "==> Configuring Sunshine"
+cmake -S "${SUNSHINE_SRC}" -B "${BUILD_SUN}" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+  -DSUNSHINE_ASSETS_DIR=share/sunshine \
+  -DBUILD_DOCS=OFF \
+  -DBUILD_TESTS=OFF \
+  -DBUILD_WERROR=OFF \
+  -DSUNSHINE_ENABLE_CUDA="${USE_CUDA}" \
+  -DCUDA_FAIL_ON_MISSING=OFF \
+  -DUDEV_RULES_INSTALL_DIR="${PREFIX}/lib/udev/rules.d" \
+  -DSYSTEMD_USER_UNIT_INSTALL_DIR="${PREFIX}/lib/systemd/user" \
+  -DSYSTEMD_MODULES_LOAD_DIR="${PREFIX}/lib/modules-load.d" \
+  -DSUNSHINE_PUBLISHER_NAME=Eclipse \
+  -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com
+
+echo "==> Building Sunshine"
+cmake --build "${BUILD_SUN}"
+# Sunshine also tries to install udev/systemd units; keep those inside PREFIX.
+cmake --install "${BUILD_SUN}"
+
+SUN_BIN="$(find "${PREFIX}" "${BUILD_SUN}" -type f -name sunshine -perm /111 | head -n 1)"
+if [[ -z "${SUN_BIN}" ]]; then
+  echo "Sunshine binary not found under ${PREFIX} or ${BUILD_SUN}" >&2
+  exit 1
+fi
+install -m 755 "${SUN_BIN}" "${BIN_DIR}/sunshine-${TRIPLE}"
+
+if [[ -d "${PREFIX}/share/sunshine" ]]; then
+  rsync -a --delete "${PREFIX}/share/sunshine/" "${ASSET_DIR}/"
+fi
+echo "Installed ${BIN_DIR}/sunshine-${TRIPLE}"
+
+echo "==> Building Moonlight"
+pushd "${BUILD_MOON}" >/dev/null
+qmake6 "${MOONLIGHT_SRC}/moonlight-qt.pro" CONFIG+=release
+make -j"$(nproc)"
+popd >/dev/null
+
+MOON_BIN="$(find "${BUILD_MOON}" "${MOONLIGHT_SRC}" -type f -name moonlight -perm /111 | head -n 1)"
+if [[ -z "${MOON_BIN}" ]]; then
+  echo "Moonlight binary not found. Looked in ${BUILD_MOON} and ${MOONLIGHT_SRC}" >&2
+  exit 1
+fi
+install -m 755 "${MOON_BIN}" "${BIN_DIR}/moonlight-${TRIPLE}"
+echo "Installed ${BIN_DIR}/moonlight-${TRIPLE}"
+
+echo
+echo "Sidecars:"
+ls -lh "${BIN_DIR}/sunshine-${TRIPLE}" "${BIN_DIR}/moonlight-${TRIPLE}"
+"${BIN_DIR}/sunshine-${TRIPLE}" --version || true
+echo "Done."
