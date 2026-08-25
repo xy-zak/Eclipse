@@ -3,13 +3,13 @@
 //! A session is the connection, not a single OS window. Ctrl+Alt+Q closes one
 //! window; the last window (or Ctrl+Alt+Esc) disconnects.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::display::{self, DisplayInfo, ScaleOption};
 use crate::pairing::{self, generate_pin};
@@ -24,6 +24,7 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_BITRATE_MBPS: u32 = 20;
 const DEFAULT_CODEC: &str = "H.264";
 
+#[cfg(test)]
 pub fn list_args(peer_ip: &str) -> Vec<String> {
     vec!["list".into(), peer_ip.into()]
 }
@@ -78,17 +79,40 @@ pub fn already_paired(text: &str) -> bool {
     text.to_ascii_lowercase().contains("already paired")
 }
 
-fn list_has_desktop(peer_ip: &str) -> bool {
-    let Ok(out) = MOONLIGHT.run_args(&list_args(peer_ip)) else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
+struct PairProc {
+    child: Child,
+    log: Arc<Mutex<String>>,
+}
+
+fn drain_pipe(mut pipe: impl Read + Send + 'static, log: Arc<Mutex<String>>) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut text) = log.lock() {
+                        text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn attach_log_drain(child: &mut Child) -> Arc<Mutex<String>> {
+    let log = Arc::new(Mutex::new(String::new()));
+    if let Some(out) = child.stdout.take() {
+        drain_pipe(out, Arc::clone(&log));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout
-        .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case(DESKTOP_APP))
+    if let Some(err) = child.stderr.take() {
+        drain_pipe(err, Arc::clone(&log));
+    }
+    log
+}
+
+fn snapshot_log(log: &Arc<Mutex<String>>) -> String {
+    log.lock().map(|text| text.clone()).unwrap_or_default()
 }
 
 fn kill_child(child: Option<Child>) {
@@ -96,6 +120,46 @@ fn kill_child(child: Option<Child>) {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+fn is_engine_log_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("sdl info")
+        || lower.contains("sdl debug")
+        || lower.contains("compiled with sdl")
+        || lower.contains(" - sdl ")
+        || (lower.contains("ffmpeg") && (lower.contains(" info") || lower.contains(" debug")))
+}
+
+fn moonlight_user_message(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_engine_log_line(line))
+        .last()
+        .map(str::to_string)
+}
+
+fn pair_succeeded(ok: bool, output: &str) -> bool {
+    ok || already_paired(output) || output.to_ascii_lowercase().contains("pairing completed")
+}
+
+fn pair_user_error(output: &str, fallback: &str) -> String {
+    moonlight_user_message(output).unwrap_or_else(|| fallback.to_string())
+}
+
+fn pair_process_error(output: &str) -> String {
+    pair_user_error(
+        output,
+        "Moonlight pair failed to start. On Windows, rebuild sidecars so Qt/SDL/FFmpeg DLLs sit next to moonlight.exe.",
+    )
+}
+
+fn pair_timeout_message(output: &str) -> String {
+    pair_user_error(
+        output,
+        "PIN was not accepted before timeout. GameStream on the host may have stalled after Moonlight connected.",
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -198,7 +262,7 @@ struct StreamChild {
 }
 
 struct SessionInner {
-    pair: Mutex<Option<Child>>,
+    pair: Mutex<Option<PairProc>>,
     windows: Mutex<Vec<StreamChild>>,
     connected_ip: Mutex<Option<String>>,
     host_displays: Mutex<Vec<DisplayInfo>>,
@@ -248,8 +312,7 @@ impl SessionProcess {
 
 impl SessionInner {
     fn stop(&self) {
-        let pair = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take();
-        kill_child(pair);
+        self.kill_pair();
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         for slot in windows.drain(..) {
             kill_child(Some(slot.child));
@@ -462,9 +525,10 @@ impl SessionInner {
 
         self.stop();
 
-        if !list_has_desktop(ip) {
-            self.pair_host(ip)?;
-        }
+        pairing::ensure_gamestream_http(ip).map_err(|err| err.into_message())?;
+        // `moonlight list` waits up to 30s when the host is missing from Moonlight's
+        // cache. `pair` already succeeds immediately if the host is paired.
+        self.pair_host(ip)?;
 
         pairing::ensure_host_video(ip).map_err(|err| err.into_message())?;
 
@@ -557,24 +621,50 @@ impl SessionInner {
 
     fn pair_host(&self, ip: &str) -> Result<(), String> {
         let pin = generate_pin();
-        let child = MOONLIGHT
-            .spawn_args(&pair_args(ip, &pin))
+        let mut child = MOONLIGHT
+            .spawn_args_captured(&pair_args(ip, &pin))
             .map_err(|err| format!("Failed to start Moonlight pair: {err}"))?;
-        *self.pair.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        let log = attach_log_drain(&mut child);
+        *self.pair.lock().unwrap_or_else(|e| e.into_inner()) = Some(PairProc { child, log });
 
         thread::sleep(PAIR_START_GRACE);
-        if !self.pair_still_running() {
-            self.kill_pair();
-            return Err(
-                "Moonlight pair failed to start. On Windows, rebuild sidecars so Qt/SDL/FFmpeg DLLs sit next to moonlight.exe."
-                    .into(),
-            );
+        if let Some((ok, output)) = self.pair_exited() {
+            if pair_succeeded(ok, &output) {
+                return Ok(());
+            }
+            return Err(pair_process_error(&output));
         }
 
-        let pin_result = pairing::submit_pin_until_accepted(ip, &pin, pairing::client_name());
-        if let Err(err) = pin_result {
-            self.kill_pair();
-            return Err(err.into_message());
+        let deadline = Instant::now() + pairing::pin_retry_budget();
+        loop {
+            match pairing::submit_pin(ip, &pin, pairing::client_name()) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(err)
+                    if matches!(
+                        err,
+                        pairing::PinError::Unauthorized | pairing::PinError::Unconfigured
+                    ) =>
+                {
+                    self.kill_pair();
+                    return Err(err.into_message());
+                }
+                Err(_) => {}
+            }
+            if let Some((ok, output)) = self.pair_exited() {
+                if pair_succeeded(ok, &output) {
+                    return Ok(());
+                }
+                return Err(pair_process_error(&output));
+            }
+            if Instant::now() >= deadline {
+                let output = self.take_pair_output();
+                if pair_succeeded(false, &output) {
+                    return Ok(());
+                }
+                return Err(pair_timeout_message(&output));
+            }
+            thread::sleep(pairing::pin_retry_interval());
         }
 
         thread::sleep(POST_PIN_SETTLE);
@@ -582,15 +672,41 @@ impl SessionInner {
         Ok(())
     }
 
-    fn kill_pair(&self) {
-        let pair = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take();
-        kill_child(pair);
+    fn pair_exited(&self) -> Option<(bool, String)> {
+        let mut slot = self.pair.lock().unwrap_or_else(|e| e.into_inner());
+        let proc = slot.as_mut()?;
+        match proc.child.try_wait() {
+            Ok(Some(status)) => {
+                let proc = slot.take()?;
+                thread::sleep(Duration::from_millis(30));
+                Some((status.success(), snapshot_log(&proc.log)))
+            }
+            _ => None,
+        }
     }
 
+    fn take_pair_output(&self) -> String {
+        let Some(mut proc) = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return String::new();
+        };
+        let _ = proc.child.kill();
+        let _ = proc.child.wait();
+        thread::sleep(Duration::from_millis(30));
+        snapshot_log(&proc.log)
+    }
+
+    fn kill_pair(&self) {
+        if let Some(mut proc) = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = proc.child.kill();
+            let _ = proc.child.wait();
+        }
+    }
+
+    #[cfg(test)]
     fn pair_still_running(&self) -> bool {
         let mut slot = self.pair.lock().unwrap_or_else(|e| e.into_inner());
         match slot.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
+            Some(proc) => matches!(proc.child.try_wait(), Ok(None)),
             None => false,
         }
     }
@@ -766,6 +882,37 @@ mod tests {
     fn already_paired_detects_moonlight_message() {
         assert!(already_paired("Work-PC is already paired"));
         assert!(!already_paired("Failed to connect"));
+    }
+
+    #[test]
+    fn pair_timeout_uses_moonlight_stderr() {
+        let noisy = "\
+00:00:00 - SDL Info (0): Compiled with SDL 2.32.70
+Failed to connect to 100.64.0.1
+";
+        assert_eq!(
+            pair_timeout_message(noisy),
+            "Failed to connect to 100.64.0.1"
+        );
+        assert!(pair_timeout_message("   ").contains("PIN was not accepted"));
+    }
+
+    #[test]
+    fn pair_process_error_skips_sdl_banner() {
+        let noisy = "\
+00:00:00 - SDL Info (0): Compiled with SDL 2.32.70
+no Qt platform plugin
+";
+        assert_eq!(pair_process_error(noisy), "no Qt platform plugin");
+        assert!(pair_process_error("").contains("Qt/SDL/FFmpeg"));
+    }
+
+    #[test]
+    fn pair_succeeded_treats_exit_zero_and_already_paired() {
+        assert!(pair_succeeded(true, "00:00:00 - SDL Info (0): Compiled with SDL 2.32.70"));
+        assert!(pair_succeeded(false, "zak-laptop is already paired"));
+        assert!(pair_succeeded(false, "Pairing completed successfully"));
+        assert!(!pair_succeeded(false, "Failed to connect to 100.64.0.1"));
     }
 
     #[test]

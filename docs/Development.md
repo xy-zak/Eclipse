@@ -67,7 +67,7 @@ If an NVIDIA GPU is present (and `ECLIPSE_CUDA` is not `off`), bootstrap also in
 
 It uses `winget` for Git, Node LTS, CMake, Ninja, rustup, VS Build Tools (C++ workload), and MSYS2; Python + aqtinstall for Qt 6.8.3 MSVC (Moonlight); `Nvidia.CUDA` when an NVIDIA GPU is present. Sunshine on Windows is **not** an MSVC build — LizardByte compiles it with MinGW UCRT64 (`mingw-w64-ucrt-x86_64-openssl` and related pacman packages). Skip CUDA with `ECLIPSE_CUDA=off`. It does **not** install the Game Ready driver.
 
-`scripts/windows-dev-env.ps1` refreshes PATH, imports VsDevCmd, and locates MSYS2. `build-sidecars.ps1` builds Sunshine inside UCRT64 and Moonlight with MSVC `nmake`.
+`scripts/windows-dev-env.ps1` refreshes PATH, locates MSYS2, and runs Moonlight `nmake` inside `vcvars64.bat` (`Invoke-EclipseNmake`) so PowerShell never imports the full VsDevCmd environment. `build-sidecars.ps1` builds Sunshine inside UCRT64 and Moonlight with MSVC `nmake`.
 
 ```powershell
 .\scripts\setup-windows.ps1     # bootstrap + sidecars + npm install
@@ -244,14 +244,14 @@ Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes:
 | Windows `setup-windows.ps1` window closes / UAC flash | Qt 6.8 extra-module names (`qtdeclarative`, `qtsvg`) are in the base kit; passing them as `aqt -m` extras fails immediately. Re-run from a PowerShell prompt (not by double-clicking). Full text: `%TEMP%\eclipse-windows-setup.log`. |
 | Sunshine CMake `Could NOT find OpenSSL` on Windows | Sunshine must be configured with MSYS2 UCRT64, not MSVC. Re-run `.\scripts\setup-windows.ps1` so bootstrap installs MSYS2 + `mingw-w64-ucrt-x86_64-openssl`. Delete `build\sunshine` if it was configured with MSVC. |
 | Sunshine configure stops at `Got from CI ... version` | CMake prints that on stderr. PowerShell `Stop` was treating it as a fatal error. Re-run `.\scripts\setup-windows.ps1`. |
-| `MISSING nmake (VsDevCmd)` after VS is installed | `windows-dev-env.ps1` must not reset PATH after importing VsDevCmd. Open a new PowerShell and re-run `.\scripts\setup-windows.ps1`. |
+| `nmake` not on PATH / `The input line is too long` | Do not dump VsDevCmd into PowerShell. `Invoke-EclipseNmake` runs `vcvars64.bat && nmake` in a child cmd after clearing leftover INCLUDE/LIB/PATH. Install VS Build Tools (MSVC) if `vcvars64.bat` is missing. |
 | Port 47990 in use | Another Eclipse/Sunshine still running, or the host service is up. Quit Eclipse (source child) or toggle Host streaming off / stop `eclipse-host.service`. |
 | Windows `https://localhost:47990` empty / `netstat` has no 47990 | Sunshine exited on first start because `share/sunshine/apps.json` was missing beside the exe. Restart Eclipse after a sidecar rebuild so `sidecar.rs` stages that layout. |
 | Windows Connect: PIN timeout / Moonlight never appears | `moonlight.exe` needs Qt/SDL/FFmpeg DLLs next to it. Re-run `.\scripts\build-sidecars.ps1` so `windeployqt` fills `src-tauri/resources/moonlight-runtime/`. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
 | Connect hangs then errors on PIN | Host Sunshine must be running (package service or source child); Moonlight pair must reach GameStream ports over Tailscale. |
-| Windows Connect PIN timeout while Linux→Windows works | Moonlight never started (missing Qt/SDL DLLs). Re-run `.\scripts\build-sidecars.ps1` and restart Eclipse. |
+| Windows Connect PIN timeout while Linux→Windows works | Windows Moonlight must add Tailscale IPv4 hosts via `QHostAddress` (not `QUrl`). Rebuild Moonlight with `.\scripts\build-sidecars.ps1` so `nmake` runs inside `vcvars64`. Also confirm `moonlight-runtime\platforms\qwindows.dll` is packaged. |
 | Moonlight “No video received” / UDP 47998 | See [Video.md](Video.md). Check host Sunshine for `Couldn't bind RTSP server to port [48010]`, `Couldn't import RGB Image: 00003009`, or capture init failure. |
 | Moonlight 503 / KMS `CAP_SYS_ADMIN` | `capture = kms` without setcap. `./scripts/linux-host-perms.sh` or `--reset-capture`. |
 

@@ -7,16 +7,54 @@ use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::net::{IpAddr, UdpSocket};
+use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::display::{self, DisplayInfo};
 use crate::pairing;
-use crate::sidecar::{probe_tcp_ms, SUNSHINE};
+use crate::sidecar::{hidden_command, probe_tcp_ms, SUNSHINE};
+#[cfg(not(windows))]
+use crate::sidecar::hide_console;
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const TAILSCALE_CACHE: Duration = Duration::from_secs(2);
 
-/// A Tailscale peer the dashboard can offer as a Connect target.
+static LAST_PEERS: Mutex<Option<(Instant, DiscoverySnapshot)>> = Mutex::new(None);
+
+fn tailscale_bin() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(root) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+            let exe = root.join("Tailscale").join("tailscale.exe");
+            if exe.is_file() {
+                return exe;
+            }
+        }
+        return PathBuf::from("tailscale.exe");
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("tailscale")
+    }
+}
+
+pub fn list_peers() -> DiscoverySnapshot {
+    // Hold the lock for the whole poll so overlapping UI timers cannot pile up
+    // Tailscale CLI processes (each of which is a console binary).
+    let mut guard = LAST_PEERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, snap)) = guard.as_ref() {
+        if at.elapsed() < TAILSCALE_CACHE {
+            return snap.clone();
+        }
+    }
+    let snap = list_peers_uncached();
+    *guard = Some((Instant::now(), snap.clone()));
+    snap
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Peer {
@@ -55,7 +93,7 @@ pub struct DiscoverySnapshot {
 }
 
 impl DiscoverySnapshot {
-    fn fail(message: impl Into<String>) -> Self {
+    pub(crate) fn fail(message: impl Into<String>) -> Self {
         Self {
             local: Some(local_without_tailscale()),
             peers: Vec::new(),
@@ -105,11 +143,10 @@ struct Draft {
     os: String,
 }
 
-pub fn list_peers() -> DiscoverySnapshot {
-    let output = match Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-    {
+fn list_peers_uncached() -> DiscoverySnapshot {
+    let mut tailscale = hidden_command(tailscale_bin());
+    tailscale.stdin(std::process::Stdio::null());
+    let output = match tailscale.args(["status", "--json"]).output() {
         Ok(out) => out,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return DiscoverySnapshot::fail(
@@ -279,15 +316,30 @@ fn pick_ipv4(ips: &[String]) -> Option<String> {
 }
 
 fn os_hostname() -> String {
-    if let Ok(out) = Command::new("hostname").output() {
-        if out.status.success() {
-            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    #[cfg(windows)]
+    {
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            let name = name.trim().to_string();
             if !name.is_empty() {
                 return name;
             }
         }
+        return "this PC".into();
     }
-    "this PC".into()
+    #[cfg(not(windows))]
+    {
+        let mut hostname = Command::new("hostname");
+        hide_console(&mut hostname);
+        if let Ok(out) = hostname.output() {
+            if out.status.success() {
+                let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+        "this PC".into()
+    }
 }
 
 fn native_os() -> String {
@@ -340,24 +392,7 @@ fn udp_local_ipv4() -> Option<String> {
 fn parse_host_ipv4() -> Option<String> {
     #[cfg(windows)]
     {
-        let out = Command::new("ipconfig").output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let line = line.trim();
-            let Some((_, rest)) = line.split_once(':') else {
-                continue;
-            };
-            if !line.to_ascii_lowercase().contains("ipv4") {
-                continue;
-            }
-            let ip = rest.trim();
-            if is_usable_lan(ip) {
-                return Some(ip.to_string());
-            }
-        }
+        // Never spawn `ipconfig` from the GUI process.
         None
     }
     #[cfg(not(windows))]
@@ -532,5 +567,30 @@ mod tests {
         assert_eq!(format_os(Some("windows")), "Windows");
         assert_eq!(format_os(Some("darwin")), "macOS");
         assert_eq!(format_os(None), "");
+    }
+
+    #[test]
+    fn os_hostname_is_nonempty_without_failing() {
+        assert!(!os_hostname().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lan_fallback_does_not_spawn_ipconfig() {
+        assert!(parse_host_ipv4().is_none());
+    }
+
+    #[test]
+    fn tailscale_bin_is_named() {
+        let name = tailscale_bin();
+        let text = name.to_string_lossy();
+        assert!(text.contains("tailscale"), "{text}");
+        #[cfg(windows)]
+        {
+            assert!(
+                text.ends_with("tailscale.exe") || text.ends_with("tailscale.EXE"),
+                "{text}"
+            );
+        }
     }
 }

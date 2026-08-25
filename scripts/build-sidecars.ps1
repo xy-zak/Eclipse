@@ -132,9 +132,17 @@ function Apply-SidecarPatches {
         }
         Write-Host "==> Applying $($patch.Name)"
         $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName)
-        if ($applied -ne 0) {
-            throw "git apply failed for $($patch.Name) (exit $applied)"
+        if ($applied -eq 0) {
+            continue
         }
+        # Later patches can overlap earlier ones, so reverse --check of the
+        # earlier patch fails even though the tree already contains it.
+        $forward = Invoke-Git -Repo $Repo -GitArgs @("apply", "--check", "--whitespace=nowarn", $patch.FullName) -Quiet
+        if ($forward -ne 0) {
+            Write-Host "Already applied $($patch.Name) (later patches overlap)"
+            continue
+        }
+        throw "git apply failed for $($patch.Name) (exit $applied)"
     }
 }
 
@@ -144,6 +152,27 @@ function Apply-SunshinePatches {
 
 function Apply-MoonlightPatches {
     Apply-SidecarPatches -Repo $MoonlightSrc -Filter "moonlight-*.patch"
+}
+
+# Sunshine is a CUI binary. A GUI Eclipse host must not flash a console when
+# the service or sidecar launches it. Mark the PE subsystem as WINDOWS.
+function Set-SunshineWindowsGui {
+    param([Parameter(Mandatory = $true)][string]$Exe)
+    $bytes = [System.IO.File]::ReadAllBytes($Exe)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Not a PE image: $Exe"
+    }
+    $eLfanew = [BitConverter]::ToInt32($bytes, 0x3C)
+    $magicOff = $eLfanew + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $magicOff)
+    if ($magic -ne 0x20B) {
+        throw "Expected PE32+ optional header in $Exe (magic=$magic)"
+    }
+    $subsysOff = $magicOff + 68
+    $bytes[$subsysOff] = 2
+    $bytes[$subsysOff + 1] = 0
+    [System.IO.File]::WriteAllBytes($Exe, $bytes)
+    Write-Host "Set WINDOWS subsystem on $Exe"
 }
 
 Apply-SunshinePatches
@@ -194,6 +223,7 @@ Invoke-EclipseMsys2 -Command "cmake --build '$buildUnix' && cmake --install '$bu
 $sunBin = Get-ChildItem -Path $Prefix -Recurse -Filter "sunshine.exe" | Select-Object -First 1
 if (-not $sunBin) { throw "sunshine.exe not found under $Prefix" }
 Copy-Item $sunBin.FullName (Join-Path $BinDir "sunshine-$Triple.exe") -Force
+Set-SunshineWindowsGui (Join-Path $BinDir "sunshine-$Triple.exe")
 
 $svcBin = Get-ChildItem -Path $BuildSun, $Prefix -Recurse -Filter "sunshinesvc.exe" -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -232,16 +262,7 @@ Push-Location $BuildMoon
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "qmake failed (exit $LASTEXITCODE)"
 }
-if (Get-Command jom -ErrorAction SilentlyContinue) {
-    jom
-} elseif (Get-Command nmake -ErrorAction SilentlyContinue) {
-    nmake release
-} else {
-    throw "Need nmake (VS Developer Prompt) or jom on PATH"
-}
-if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-    throw "Moonlight nmake/jom failed (exit $LASTEXITCODE)"
-}
+Invoke-EclipseNmake -WorkingDirectory $BuildMoon -ArgumentList @("release")
 Pop-Location
 
 $moonBin = Get-ChildItem -Path $BuildMoon, $MoonlightSrc -Recurse -Filter "Moonlight.exe" -ErrorAction SilentlyContinue |

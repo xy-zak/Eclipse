@@ -71,3 +71,19 @@ enable_eclipse_host() {
 chmod 755 /usr/lib/eclipse/eclipse-hostctl 2>/dev/null || true
 
 enable_eclipse_host
+
+open_gamestream_firewall() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow 47984:47990/tcp >/dev/null 2>&1 || true
+    ufw allow 48010/tcp >/dev/null 2>&1 || true
+    ufw allow 47998:48010/udp >/dev/null 2>&1 || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q running; then
+    firewall-cmd --permanent --add-port=47984-47990/tcp >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port=48010/tcp >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port=47998-48010/udp >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+open_gamestream_firewall

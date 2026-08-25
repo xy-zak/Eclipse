@@ -27,17 +27,23 @@ if (-not (Test-Path $svc)) {
     throw "sunshinesvc.exe missing at $svc. Re-run scripts\build-sidecars.ps1 (or omit -SkipSidecars)."
 }
 
+# Cursor (and some CI) set CARGO_TARGET_DIR to a temp cache. Force the
+# documented output so NSIS lands in src-tauri\target\release\bundle\nsis.
+$env:CARGO_TARGET_DIR = Join-Path $Root "src-tauri\target"
+Write-Host "CARGO_TARGET_DIR=$($env:CARGO_TARGET_DIR)"
+
 Write-Host "==> Bundling NSIS installer"
 npm run tauri -- build --bundles nsis
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "tauri build exited $LASTEXITCODE"
 }
 
-$nsis = Get-ChildItem -Path (Join-Path $Root "src-tauri\target\release\bundle\nsis") -Filter "*.exe" -ErrorAction SilentlyContinue
+$nsisDest = Join-Path $Root "src-tauri\target\release\bundle\nsis"
+$nsis = Get-ChildItem -Path $nsisDest -Filter "*.exe" -ErrorAction SilentlyContinue
 if ($nsis) {
     Write-Host ""
     Write-Host "Windows installer:"
     $nsis | ForEach-Object { Write-Host $_.FullName }
 } else {
-    Write-Host "Look for the setup exe under src-tauri\target\release\bundle\nsis"
+    throw "NSIS installer missing under $nsisDest"
 }

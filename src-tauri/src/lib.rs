@@ -13,13 +13,26 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 
 #[tauri::command]
-fn sidecar_status(host: State<HostProcess>) -> SidecarStatus {
-    SidecarStatus::snapshot(&host)
+async fn sidecar_status(app: tauri::AppHandle) -> SidecarStatus {
+    tauri::async_runtime::spawn_blocking(move || {
+        SidecarStatus::snapshot(&app.state::<HostProcess>())
+    })
+    .await
+    .unwrap_or_else(|_| SidecarStatus {
+        sunshine_present: false,
+        moonlight_present: false,
+        sunshine_running: false,
+        host_triple: env!("HOST_TRIPLE").to_string(),
+    })
 }
 
 #[tauri::command]
-fn list_peers() -> DiscoverySnapshot {
-    discovery::list_peers()
+async fn list_peers() -> DiscoverySnapshot {
+    tauri::async_runtime::spawn_blocking(discovery::list_peers)
+        .await
+        .unwrap_or_else(|err| {
+            DiscoverySnapshot::fail(format!("Discovery task failed: {err}"))
+        })
 }
 
 #[tauri::command]
@@ -28,8 +41,11 @@ fn session_status(session: State<SessionProcess>) -> SessionStatus {
 }
 
 #[tauri::command]
-fn inbound_status() -> Option<InboundStream> {
-    pairing::local_inbound()
+async fn inbound_status() -> Option<InboundStream> {
+    tauri::async_runtime::spawn_blocking(pairing::local_inbound)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
@@ -43,8 +59,11 @@ fn disconnect(session: State<SessionProcess>) {
 }
 
 #[tauri::command]
-fn peer_latency(ip: String) -> Option<u32> {
-    discovery::peer_latency_ms(&ip)
+async fn peer_latency(ip: String) -> Option<u32> {
+    tauri::async_runtime::spawn_blocking(move || discovery::peer_latency_ms(&ip))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
@@ -186,7 +205,11 @@ pub fn run() {
         .setup(|app| {
             // Packaged installs run Sunshine as a boot-time service. Attach if
             // :47990 is already up; spawn a child only for source/dev trees.
-            app.state::<HostProcess>().start_sunshine();
+            // Off the UI thread: credential seeding and SCM queries can block.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                handle.state::<HostProcess>().start_sunshine();
+            });
             setup_tray(app)?;
             if !start_hidden() {
                 show_main_window(app.handle());

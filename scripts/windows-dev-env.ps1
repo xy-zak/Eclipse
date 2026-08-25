@@ -1,6 +1,7 @@
 # Shared Windows session environment for Eclipse bootstrap and sidecar builds.
-# Dot-source this script. Refreshes PATH, Qt, CUDA, cargo, VsDevCmd (nmake/cl),
-# and helpers to run Sunshine builds inside MSYS2 UCRT64.
+# Dot-source this script. Refreshes PATH, Qt, CUDA, cargo, and helpers to run
+# Sunshine builds inside MSYS2 UCRT64. Moonlight nmake runs via Invoke-EclipseNmake
+# (vcvars64 inside cmd) so PowerShell never imports the full VsDevCmd PATH.
 
 function Add-EclipseToolPaths {
     $cargo = Join-Path $env:USERPROFILE ".cargo\bin"
@@ -47,34 +48,79 @@ function Update-EclipseSessionPath {
     Add-EclipseToolPaths
 }
 
+function Get-EclipseVcvars64 {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        return $null
+    }
+    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vs) {
+        return $null
+    }
+    $bat = Join-Path $vs.Trim() "VC\Auxiliary\Build\vcvars64.bat"
+    if (Test-Path $bat) {
+        return $bat
+    }
+    $null
+}
+
+# Run nmake inside vcvars64. Do not dump VsDevCmd into this PowerShell session:
+# that PATH can exceed cmd.exe's 8191-char limit ("The input line is too long").
+# Shrink PATH in the child cmd *before* vcvars64 so its `set PATH=` stays short.
+function Invoke-EclipseNmake {
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [string[]]$ArgumentList = @("release")
+    )
+    $vcvars = Get-EclipseVcvars64
+    if (-not $vcvars) {
+        throw "vcvars64.bat not found. Install VS Build Tools (MSVC) or run from a Developer Prompt."
+    }
+    $dir = [System.IO.Path]::GetFullPath($WorkingDirectory)
+    $nmakeArgs = ($ArgumentList | ForEach-Object { $_.ToString() }) -join " "
+    $shortPath = "$env:SystemRoot\System32;$env:SystemRoot"
+    # Cursor/VsDevCmd can leave INCLUDE/LIB already near cmd's 8191-char cap.
+    # vcvars64 appends; clear first so `set INCLUDE=` succeeds.
+    $clearVars = @(
+        "INCLUDE", "LIB", "LIBPATH", "EXTERNAL_INCLUDE", "WindowsLibPath",
+        "__VSCMD_PREINIT_PATH", "UniversalCRTSdkDir", "UCRTVersion",
+        "WindowsSdkDir", "WindowsSDKVersion", "WindowsSDKLibVersion",
+        "WindowsSdkBinPath", "WindowsSdkVerBinPath", "VCINSTALLDIR",
+        "VCToolsInstallDir", "VCToolsRedistDir", "VCToolsVersion",
+        "VSINSTALLDIR", "DevEnvDir", "NETFXSDKDir", "IFCPATH"
+    )
+    $bat = Join-Path $env:TEMP "eclipse-nmake-$PID.bat"
+    $lines = @(
+        "@echo off"
+        "set `"PATH=$shortPath`""
+    )
+    foreach ($name in $clearVars) {
+        $lines += "set $name="
+    }
+    $lines += @(
+        "call `"$vcvars`" >nul"
+        "if errorlevel 1 exit /b 1"
+        "cd /d `"$dir`""
+        "nmake $nmakeArgs"
+    )
+    $lines | Set-Content -Path $bat -Encoding ASCII
+    Write-Host "nmake in $dir : $nmakeArgs"
+    try {
+        cmd.exe /c "`"$bat`""
+        if ($LASTEXITCODE -ne 0) {
+            throw "nmake failed (exit $LASTEXITCODE) in $dir"
+        }
+    } finally {
+        Remove-Item $bat -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Import-EclipseVsDevCmd {
     if (Get-Command nmake -ErrorAction SilentlyContinue) {
         return
     }
-    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere)) {
-        return
-    }
-    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $vs) {
-        return
-    }
-    $vsdev = Join-Path $vs.Trim() "Common7\Tools\VsDevCmd.bat"
-    if (-not (Test-Path $vsdev)) {
-        return
-    }
-    $envDump = cmd.exe /c "`"$vsdev`" -arch=x64 -host_arch=x64 -no_logo && set"
-    foreach ($line in ($envDump -split "`r?`n")) {
-        if ($line -match "^([^=]+)=(.*)$") {
-            $name = $Matches[1]
-            $value = $Matches[2]
-            if ($name -eq "Path" -or $name -eq "PATH") {
-                $env:Path = $value
-            } else {
-                Set-Item -Path "Env:$name" -Value $value
-            }
-        }
-    }
+    # Moonlight/nmake builds must use Invoke-EclipseNmake instead of importing
+    # the full VsDevCmd environment into PowerShell.
 }
 
 function Get-EclipseMsys2Root {
@@ -163,6 +209,4 @@ function Invoke-EclipseMsys2 {
 
 Update-EclipseSessionPath
 Import-EclipseVsDevCmd
-# Re-prepend Qt/CUDA/cargo without resetting PATH — a second
-# Update-EclipseSessionPath would drop nmake/cl from VsDevCmd.
 Add-EclipseToolPaths

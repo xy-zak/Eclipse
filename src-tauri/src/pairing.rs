@@ -10,10 +10,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::sidecar::{probe_tcp, SUNSHINE, SUNSHINE_UI_PASS, SUNSHINE_UI_USER};
 
-const PIN_RETRY: Duration = Duration::from_secs(25);
+const PIN_RETRY: Duration = Duration::from_secs(45);
 const PIN_INTERVAL: Duration = Duration::from_millis(300);
 const PIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RTSP_PORT: u16 = 48010;
+/// GameStream HTTP. Moonlight pair/list use this, not the Sunshine Web UI (47990).
+pub const GAMESTREAM_HTTP_PORT: u16 = 47989;
 
 const CLIENT_NAME: &str = "Eclipse";
 
@@ -123,6 +125,26 @@ pub fn client_name() -> &'static str {
     CLIENT_NAME
 }
 
+/// True when Moonlight can reach GameStream HTTP on the peer.
+pub fn gamestream_http_reachable(host: &str) -> bool {
+    probe_tcp(host, GAMESTREAM_HTTP_PORT, Duration::from_secs(1))
+}
+
+pub fn gamestream_unreachable_message(host: &str) -> String {
+    format!(
+        "Host {host} does not accept GameStream on TCP {GAMESTREAM_HTTP_PORT}. Pairing cannot start. On the host PC allow TCP 47984-47990 and UDP 47998-48010 (then restart Eclipse there)."
+    )
+}
+
+/// Fail Connect before spawning Moonlight pair when GameStream HTTP is closed.
+pub fn ensure_gamestream_http(host: &str) -> Result<(), PinError> {
+    if gamestream_http_reachable(host) {
+        Ok(())
+    } else {
+        Err(PinError::Other(gamestream_unreachable_message(host)))
+    }
+}
+
 /// Retry `op` until it returns `Ok(true)` or the budget is exhausted.
 pub fn retry_until_ok<F>(mut op: F, budget: Duration, interval: Duration) -> Result<(), PinError>
 where
@@ -192,8 +214,12 @@ pub fn submit_pin(host: &str, pin: &str, name: &str) -> Result<bool, PinError> {
         .unwrap_or(false))
 }
 
-pub fn submit_pin_until_accepted(host: &str, pin: &str, name: &str) -> Result<(), PinError> {
-    retry_until_ok(|| submit_pin(host, pin, name), PIN_RETRY, PIN_INTERVAL)
+pub fn pin_retry_budget() -> Duration {
+    PIN_RETRY
+}
+
+pub fn pin_retry_interval() -> Duration {
+    PIN_INTERVAL
 }
 
 /// GET `/api/logs`, then probe TCP 48010. Log text can lie about RTSP bind.
@@ -385,6 +411,13 @@ mod tests {
             apps_close_url("127.0.0.1"),
             "https://127.0.0.1:47990/api/apps/close"
         );
+    }
+
+    #[test]
+    fn gamestream_http_port_is_moonlight_serverinfo() {
+        assert_eq!(GAMESTREAM_HTTP_PORT, 47989);
+        assert!(gamestream_unreachable_message("100.64.0.2").contains("47989"));
+        assert_eq!(pin_retry_budget(), Duration::from_secs(45));
     }
 
     #[test]

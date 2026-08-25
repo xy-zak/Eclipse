@@ -10,6 +10,33 @@ use std::process::{Child, Command, Output};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// CREATE_NO_WINDOW — hide CUI helper windows. Combined with
+/// CREATE_UNICODE_ENVIRONMENT because `creation_flags` replaces Rust's defaults.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+
+/// Suppress a console window when `program` is a Windows CUI binary.
+pub(crate) fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// `Command::new` that will not open a terminal on a GUI Eclipse process.
+pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    hide_console(&mut cmd);
+    cmd
+}
+
 /// Compile-time Sunshine assets path used by the Windows sidecar build
 /// (`-DSUNSHINE_ASSETS_DIR=share/sunshine`). Sunshine concatenates this with
 /// `/apps.json` in C++; it does not read `SUNSHINE_ASSETS_DIR` from the environment.
@@ -246,6 +273,7 @@ impl Engine {
             )
         })?;
         let mut cmd = Command::new(&bin);
+        hide_console(&mut cmd);
         if let Some(parent) = bin.parent() {
             let mut cwd = parent.to_path_buf();
             if self.assets_rel.is_some() {
@@ -275,10 +303,50 @@ impl Engine {
         args: &[String],
         env: &[(&str, String)],
     ) -> Result<Child, std::io::Error> {
+        self.spawn_args_env_stdio(args, env, true)
+    }
+
+    /// Spawn with captured stdout/stderr so CLI failures are visible to Connect.
+    pub(crate) fn spawn_args_captured(
+        self,
+        args: &[String],
+    ) -> Result<Child, std::io::Error> {
+        self.spawn_args_env_stdio(
+            args,
+            &[("SDL_LOGGING", "*=error".to_string())],
+            false,
+        )
+    }
+
+    fn spawn_args_env_stdio(
+        self,
+        args: &[String],
+        env: &[(&str, String)],
+        null_stdio: bool,
+    ) -> Result<Child, std::io::Error> {
         let mut cmd = self.command()?;
         cmd.args(args);
         for (key, value) in env {
             cmd.env(key, value);
+        }
+        #[cfg(windows)]
+        {
+            use std::process::Stdio;
+            cmd.stdin(Stdio::null());
+            if null_stdio {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            } else {
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if !null_stdio {
+                use std::process::Stdio;
+                cmd.stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
         }
         cmd.spawn()
     }
@@ -286,6 +354,11 @@ impl Engine {
     pub(crate) fn run_args(self, args: &[String]) -> Result<Output, std::io::Error> {
         let mut cmd = self.command()?;
         cmd.args(args);
+        #[cfg(windows)]
+        {
+            use std::process::Stdio;
+            cmd.stdin(Stdio::null());
+        }
         cmd.output()
     }
 
@@ -412,27 +485,46 @@ fn prepend_env_path(cmd: &mut Command, dir: &Path) {
     }
 }
 
-fn prepare_moonlight_runtime(bin_dir: &Path, cmd: &mut Command) {
-    if moonlight_runtime_ready(bin_dir) {
-        return;
+/// Qt loads `platforms/qwindows.dll` from the exe directory or
+/// `QT_QPA_PLATFORM_PLUGIN_PATH`. Packaged installs keep the windeployqt
+/// tree in `moonlight-runtime/` (Program Files is not writable, so copying
+/// those files beside `moonlight.exe` fails). PATH alone is not enough.
+fn moonlight_runtime_env(runtime: &Path) -> Vec<(&'static str, PathBuf)> {
+    let mut vars = vec![
+        ("QT_QPA_PLATFORM_PLUGIN_PATH", runtime.join("platforms")),
+        ("QT_PLUGIN_PATH", runtime.to_path_buf()),
+    ];
+    let qml = runtime.join("qml");
+    if qml.is_dir() {
+        vars.push(("QML_IMPORT_PATH", qml.clone()));
+        vars.push(("QML2_IMPORT_PATH", qml));
     }
-    for runtime in moonlight_runtime_candidates(bin_dir) {
-        if !runtime.is_dir() {
-            continue;
-        }
-        if paths_same(&runtime, bin_dir) {
-            if moonlight_runtime_ready(bin_dir) {
-                return;
-            }
-            continue;
-        }
-        if stage_moonlight_runtime(bin_dir, &runtime).is_ok() && moonlight_runtime_ready(bin_dir) {
-            return;
-        }
-        if runtime.join("Qt6Core.dll").is_file() {
-            prepend_env_path(cmd, &runtime);
-            return;
-        }
+    vars
+}
+
+fn find_moonlight_runtime(bin_dir: &Path) -> Option<PathBuf> {
+    moonlight_runtime_candidates(bin_dir)
+        .into_iter()
+        .find(|p| moonlight_runtime_ready(p))
+}
+
+fn apply_moonlight_runtime_env(cmd: &mut Command, runtime: &Path) {
+    prepend_env_path(cmd, runtime);
+    for (key, value) in moonlight_runtime_env(runtime) {
+        cmd.env(key, value);
+    }
+}
+
+fn prepare_moonlight_runtime(bin_dir: &Path, cmd: &mut Command) {
+    let Some(runtime) = find_moonlight_runtime(bin_dir) else {
+        eprintln!(
+            "Eclipse: Moonlight Qt runtime missing (need Qt6Core.dll and platforms/qwindows.dll)"
+        );
+        return;
+    };
+    apply_moonlight_runtime_env(cmd, &runtime);
+    if !paths_same(&runtime, bin_dir) {
+        let _ = stage_moonlight_runtime(bin_dir, &runtime);
     }
 }
 
@@ -502,7 +594,7 @@ impl HostProcess {
             return;
         }
         *slot = None;
-        if host_service_installed() {
+        if host_service_installed() || packaged_windows_host() {
             if sunshine_already_hosted() {
                 eprintln!(
                     "Eclipse: Sunshine already running (health {}); attaching, not spawning.",
@@ -540,7 +632,7 @@ impl HostProcess {
     /// Tray/package control: start or stop the OS host service when installed,
     /// otherwise the GUI-owned Sunshine child (source/`tauri dev`).
     pub fn set_host_running(&self, on: bool) -> Result<(), String> {
-        if host_service_installed() {
+        if host_service_installed() || packaged_windows_host() {
             if on {
                 self.stop_sunshine();
                 start_host_service()?;
@@ -609,14 +701,28 @@ fn sunshine_already_hosted() -> bool {
     SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT) || host_service_active()
 }
 
+/// Packaged Windows layout: `tools/sunshinesvc.exe` next to Eclipse.
+fn sunshine_svc_beside(exe_dir: &Path) -> bool {
+    exe_dir.join("tools").join("sunshinesvc.exe").is_file()
+}
+
+/// Prefer the packaged layout over `sc query` so a failed SCM lookup does not
+/// spawn a second Sunshine child (which would open a console and fight the host).
+fn packaged_windows_host() -> bool {
+    #[cfg(windows)]
+    {
+        current_exe_dir().is_some_and(|dir| sunshine_svc_beside(&dir))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn host_service_installed() -> bool {
     #[cfg(windows)]
     {
-        Command::new("sc")
-            .args(["query", WINDOWS_HOST_SERVICE])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        windows_scm::exists(WINDOWS_HOST_SERVICE)
     }
     #[cfg(not(windows))]
     {
@@ -646,23 +752,11 @@ fn stop_host_service() -> Result<(), String> {
 fn control_host_service(action: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let status = Command::new("net")
-            .args([action, WINDOWS_HOST_SERVICE])
-            .status()
-            .map_err(|err| format!("net {action} {WINDOWS_HOST_SERVICE}: {err}"))?;
-        if status.success() {
-            return Ok(());
+        match action {
+            "start" => windows_scm::start(WINDOWS_HOST_SERVICE),
+            "stop" => windows_scm::stop(WINDOWS_HOST_SERVICE),
+            other => Err(format!("unsupported host service action: {other}")),
         }
-        // `net start` when already running / `net stop` when already stopped.
-        if action == "start" && host_service_active() {
-            return Ok(());
-        }
-        if action == "stop" && !host_service_active() {
-            return Ok(());
-        }
-        Err(format!(
-            "net {action} {WINDOWS_HOST_SERVICE} failed (is the service ACL missing?)"
-        ))
     }
     #[cfg(not(windows))]
     {
@@ -697,13 +791,7 @@ fn control_host_service(action: &str) -> Result<(), String> {
 fn host_service_active() -> bool {
     #[cfg(windows)]
     {
-        let Ok(out) = Command::new("sc")
-            .args(["query", WINDOWS_HOST_SERVICE])
-            .output()
-        else {
-            return false;
-        };
-        String::from_utf8_lossy(&out.stdout).contains("RUNNING")
+        windows_scm::running(WINDOWS_HOST_SERVICE)
     }
     #[cfg(not(windows))]
     {
@@ -712,6 +800,173 @@ fn host_service_active() -> bool {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+}
+
+/// Query the Service Control Manager without spawning `sc.exe` (a console app).
+#[cfg(windows)]
+mod windows_scm {
+    use std::ptr;
+
+    const SC_MANAGER_CONNECT: u32 = 0x0001;
+    const SERVICE_QUERY_STATUS: u32 = 0x0004;
+    const SERVICE_START: u32 = 0x0010;
+    const SERVICE_STOP: u32 = 0x0020;
+    const SERVICE_RUNNING: u32 = 0x0004;
+    const SERVICE_CONTROL_STOP: u32 = 0x0001;
+    const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+    const ERROR_SERVICE_NOT_ACTIVE: u32 = 1062;
+
+    #[repr(C)]
+    struct ServiceStatus {
+        service_type: u32,
+        current_state: u32,
+        controls_accepted: u32,
+        win32_exit_code: u32,
+        service_specific_exit_code: u32,
+        check_point: u32,
+        wait_hint: u32,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenSCManagerW(
+            machine: *const u16,
+            database: *const u16,
+            access: u32,
+        ) -> *mut core::ffi::c_void;
+        fn OpenServiceW(
+            scm: *mut core::ffi::c_void,
+            name: *const u16,
+            access: u32,
+        ) -> *mut core::ffi::c_void;
+        fn QueryServiceStatus(svc: *mut core::ffi::c_void, status: *mut ServiceStatus) -> i32;
+        fn StartServiceW(
+            svc: *mut core::ffi::c_void,
+            args: u32,
+            arg_vectors: *const *const u16,
+        ) -> i32;
+        fn ControlService(
+            svc: *mut core::ffi::c_void,
+            control: u32,
+            status: *mut ServiceStatus,
+        ) -> i32;
+        fn CloseServiceHandle(handle: *mut core::ffi::c_void) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLastError() -> u32;
+    }
+
+    fn wide(name: &str) -> Vec<u16> {
+        name.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn with_service<T>(name: &str, f: impl FnOnce(*mut core::ffi::c_void) -> T) -> Option<T> {
+        let name_w = wide(name);
+        unsafe {
+            let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+            if scm.is_null() {
+                return None;
+            }
+            let svc = OpenServiceW(scm, name_w.as_ptr(), SERVICE_QUERY_STATUS);
+            let result = if svc.is_null() {
+                None
+            } else {
+                let value = f(svc);
+                CloseServiceHandle(svc);
+                Some(value)
+            };
+            CloseServiceHandle(scm);
+            result
+        }
+    }
+
+    pub fn exists(name: &str) -> bool {
+        with_service(name, |_| ()).is_some()
+    }
+
+    pub fn running(name: &str) -> bool {
+        with_service(name, |svc| {
+            let mut status = ServiceStatus {
+                service_type: 0,
+                current_state: 0,
+                controls_accepted: 0,
+                win32_exit_code: 0,
+                service_specific_exit_code: 0,
+                check_point: 0,
+                wait_hint: 0,
+            };
+            unsafe { QueryServiceStatus(svc, &mut status) != 0 && status.current_state == SERVICE_RUNNING }
+        })
+        .unwrap_or(false)
+    }
+
+    fn empty_status() -> ServiceStatus {
+        ServiceStatus {
+            service_type: 0,
+            current_state: 0,
+            controls_accepted: 0,
+            win32_exit_code: 0,
+            service_specific_exit_code: 0,
+            check_point: 0,
+            wait_hint: 0,
+        }
+    }
+
+    pub fn start(name: &str) -> Result<(), String> {
+        let name_w = wide(name);
+        unsafe {
+            let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+            if scm.is_null() {
+                return Err("OpenSCManagerW failed".into());
+            }
+            let svc = OpenServiceW(scm, name_w.as_ptr(), SERVICE_START | SERVICE_QUERY_STATUS);
+            if svc.is_null() {
+                CloseServiceHandle(scm);
+                return Err(format!("service {name} was not found"));
+            }
+            let ok = StartServiceW(svc, 0, ptr::null());
+            let err = if ok == 0 { GetLastError() } else { 0 };
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            if ok != 0 || err == ERROR_SERVICE_ALREADY_RUNNING {
+                Ok(())
+            } else {
+                Err(format!("StartServiceW({name}) failed (win32 {err})"))
+            }
+        }
+    }
+
+    pub fn stop(name: &str) -> Result<(), String> {
+        let name_w = wide(name);
+        unsafe {
+            let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+            if scm.is_null() {
+                return Err("OpenSCManagerW failed".into());
+            }
+            let svc = OpenServiceW(scm, name_w.as_ptr(), SERVICE_STOP | SERVICE_QUERY_STATUS);
+            if svc.is_null() {
+                CloseServiceHandle(scm);
+                return Err(format!("service {name} was not found"));
+            }
+            let mut status = empty_status();
+            let ok = ControlService(svc, SERVICE_CONTROL_STOP, &mut status);
+            let err = if ok == 0 { GetLastError() } else { 0 };
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            if ok != 0 || err == ERROR_SERVICE_NOT_ACTIVE {
+                Ok(())
+            } else {
+                Err(format!("ControlService(stop, {name}) failed (win32 {err})"))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn wide_nul_len(name: &str) -> usize {
+        wide(name).len()
     }
 }
 
@@ -738,6 +993,43 @@ impl SidecarStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hide_console_is_safe_on_all_hosts() {
+        hide_console(&mut Command::new("echo"));
+        let _ = hidden_command("echo");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_no_window_matches_win32() {
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
+        assert_eq!(CREATE_UNICODE_ENVIRONMENT, 0x0000_0400);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scm_wide_strings_are_nul_terminated() {
+        assert_eq!(windows_scm::wide_nul_len("SunshineService"), "SunshineService".len() + 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scm_start_stop_missing_service_does_not_spawn_net() {
+        let missing = "EclipseNoSuchService7e5d5a7e";
+        assert!(windows_scm::start(missing).unwrap_err().contains("not found"));
+        assert!(windows_scm::stop(missing).unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn sunshine_svc_beside_detects_packaged_layout() {
+        let root = unique_temp("eclipse-svc");
+        assert!(!sunshine_svc_beside(&root));
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(root.join("tools").join("sunshinesvc.exe"), []).unwrap();
+        assert!(sunshine_svc_beside(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn engine_names_are_stable_contracts() {
@@ -1006,6 +1298,45 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let err = stage_moonlight_runtime(&root, &root.join("missing")).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_moonlight_runtime_uses_packaged_subdir() {
+        let root = unique_temp("eclipse-moon-find");
+        let runtime = root.join("moonlight-runtime");
+        std::fs::create_dir_all(runtime.join("platforms")).unwrap();
+        std::fs::write(runtime.join("Qt6Core.dll"), "qt").unwrap();
+        std::fs::write(runtime.join("platforms").join("qwindows.dll"), "plugin").unwrap();
+        assert_eq!(find_moonlight_runtime(&root).as_deref(), Some(runtime.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn moonlight_runtime_ready_requires_qwindows() {
+        let root = unique_temp("eclipse-moon-no-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Qt6Core.dll"), "qt").unwrap();
+        assert!(!moonlight_runtime_ready(&root));
+        std::fs::create_dir_all(root.join("platforms")).unwrap();
+        std::fs::write(root.join("platforms").join("qwindows.dll"), "plugin").unwrap();
+        assert!(moonlight_runtime_ready(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn moonlight_runtime_env_points_at_platforms_and_qml() {
+        let root = unique_temp("eclipse-moon-env");
+        let platforms = root.join("platforms");
+        let qml = root.join("qml");
+        std::fs::create_dir_all(&platforms).unwrap();
+        std::fs::create_dir_all(&qml).unwrap();
+        let vars = moonlight_runtime_env(&root);
+        let get = |key: &str| vars.iter().find(|(k, _)| *k == key).map(|(_, p)| p);
+        assert_eq!(get("QT_QPA_PLATFORM_PLUGIN_PATH"), Some(&platforms));
+        assert_eq!(get("QT_PLUGIN_PATH"), Some(&root));
+        assert_eq!(get("QML_IMPORT_PATH"), Some(&qml));
+        assert_eq!(get("QML2_IMPORT_PATH"), Some(&qml));
         let _ = std::fs::remove_dir_all(&root);
     }
 

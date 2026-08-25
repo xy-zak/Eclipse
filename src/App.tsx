@@ -68,10 +68,16 @@ export default function App() {
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
   const traffic = useRef<{ t: number; bytes: number } | null>(null);
+  const peersInFlight = useRef(false);
+  const statusInFlight = useRef(false);
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
   const refreshPeers = useCallback((showLoading = false) => {
+    if (peersInFlight.current) {
+      return;
+    }
+    peersInFlight.current = true;
     if (showLoading) {
       setLoading(true);
     }
@@ -98,7 +104,10 @@ export default function App() {
         traffic.current = { t: now, bytes };
       })
       .catch((err: unknown) => setError(String(err)))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        peersInFlight.current = false;
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
@@ -115,20 +124,29 @@ export default function App() {
   }, [refreshPeers]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      invoke<SidecarStatus>("sidecar_status").then(setStatus).catch(() => {});
-      invoke<SessionStatus>("session_status")
-        .then(setSession)
-        .catch(() => {});
-      invoke<InboundStream | null>("inbound_status")
-        .then(setInbound)
-        .catch(() => setInbound(null));
-    }, 1000);
+    const tick = () => {
+      if (statusInFlight.current) {
+        return;
+      }
+      statusInFlight.current = true;
+      Promise.all([
+        invoke<SidecarStatus>("sidecar_status").then(setStatus).catch(() => {}),
+        invoke<SessionStatus>("session_status")
+          .then(setSession)
+          .catch(() => {}),
+        invoke<InboundStream | null>("inbound_status")
+          .then(setInbound)
+          .catch(() => setInbound(null)),
+      ]).finally(() => {
+        statusInFlight.current = false;
+      });
+    };
+    const id = window.setInterval(tick, 2000);
     return () => window.clearInterval(id);
   }, []);
 
   useEffect(() => {
-    const id = window.setInterval(() => refreshPeers(false), 3000);
+    const id = window.setInterval(() => refreshPeers(false), 5000);
     return () => window.clearInterval(id);
   }, [refreshPeers]);
 
