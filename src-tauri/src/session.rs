@@ -1,22 +1,28 @@
-//! Client session launch: pair if needed, then spawn Moonlight on Desktop.
+//! Client session launch: pair if needed, then spawn Moonlight window(s) on Desktop.
 //!
-//! CLI mapping lives here so a Moonlight flag change does not touch discovery
-//! or the dashboard.
+//! A session is the connection, not a single OS window. Ctrl+Alt+Q closes one
+//! window; the last window (or Ctrl+Alt+Esc) disconnects.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::Child;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::display::{self, DisplayInfo, ScaleOption};
 use crate::pairing::{self, generate_pin};
 use crate::sidecar::MOONLIGHT;
 
 const DESKTOP_APP: &str = "Desktop";
 const POST_PIN_SETTLE: Duration = Duration::from_secs(3);
 const PAIR_START_GRACE: Duration = Duration::from_millis(400);
-pub const STREAM_WIDTH: u32 = 1920;
-pub const STREAM_HEIGHT: u32 = 1080;
 pub const STREAM_FPS: u32 = 60;
+const DEFAULT_WIDTH: u32 = 1920;
+const DEFAULT_HEIGHT: u32 = 1080;
+const DEFAULT_BITRATE_MBPS: u32 = 20;
+const DEFAULT_CODEC: &str = "H.264";
 
 pub fn list_args(peer_ip: &str) -> Vec<String> {
     vec!["list".into(), peer_ip.into()]
@@ -31,23 +37,41 @@ pub fn pair_args(peer_ip: &str, pin: &str) -> Vec<String> {
     ]
 }
 
-pub fn stream_args(peer_ip: &str) -> Vec<String> {
-    // Windows Moonlight otherwise uses the local monitor (often 4K HEVC). Linux
-    // VAAPI hosts frequently encode audio but never emit video at that size, which
-    // Moonlight reports as a UDP 47998 timeout even when the path is open.
-    vec![
+pub fn stream_args(
+    peer_ip: &str,
+    width: u32,
+    height: u32,
+    display_index: Option<usize>,
+    audio: bool,
+    prefs: &StreamPrefs,
+) -> Vec<String> {
+    let mut args = vec![
         "stream".into(),
-        "--1080".into(),
+        "--resolution".into(),
+        format!("{width}x{height}"),
         "--fps".into(),
-        STREAM_FPS.to_string(),
+        prefs.fps.to_string(),
         "--video-codec".into(),
-        "H.264".into(),
+        prefs.codec.clone(),
+        "--bitrate".into(),
+        (prefs.bitrate_mbps * 1000).to_string(),
         "--no-hdr".into(),
         "--packet-size".into(),
         "1024".into(),
-        peer_ip.into(),
-        DESKTOP_APP.into(),
-    ]
+        "--absolute-mouse".into(),
+        "--display-mode".into(),
+        "windowed".into(),
+    ];
+    if let Some(index) = display_index {
+        args.push("--host-display".into());
+        args.push(index.to_string());
+    }
+    if !audio {
+        args.push("--mute-on-focus-loss".into());
+    }
+    args.push(peer_ip.into());
+    args.push(DESKTOP_APP.into());
+    args
 }
 
 pub fn already_paired(text: &str) -> bool {
@@ -74,6 +98,84 @@ fn kill_child(child: Option<Child>) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ControlCmd {
+    DisconnectAll,
+    OpenAll,
+    SwitchDisplay { index: usize, pid: Option<u32> },
+    Ignore,
+}
+
+fn parse_control_line(cmd: &str) -> ControlCmd {
+    let cmd = cmd.trim();
+    if cmd == "disconnect-all" || cmd == "esc" {
+        return ControlCmd::DisconnectAll;
+    }
+    if cmd == "open-all" || cmd == "0" {
+        return ControlCmd::OpenAll;
+    }
+    if let Some(rest) = cmd.strip_prefix("switch-display ") {
+        let mut parts = rest.split_whitespace();
+        let Some(n) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+            return ControlCmd::Ignore;
+        };
+        let pid = parts.next().and_then(|s| s.parse::<u32>().ok());
+        return ControlCmd::SwitchDisplay {
+            index: n.saturating_sub(1),
+            pid,
+        };
+    }
+    ControlCmd::Ignore
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamPrefs {
+    pub scale: u32,
+    pub fps: u32,
+    pub codec: String,
+    pub bitrate_mbps: u32,
+}
+
+impl Default for StreamPrefs {
+    fn default() -> Self {
+        Self {
+            scale: 1,
+            fps: STREAM_FPS,
+            codec: DEFAULT_CODEC.into(),
+            bitrate_mbps: DEFAULT_BITRATE_MBPS,
+        }
+    }
+}
+
+fn validate_prefs(prefs: StreamPrefs) -> Result<StreamPrefs, String> {
+    if !matches!(prefs.scale, 0 | 1 | 2 | 4) {
+        return Err("Stream scale must be Quarter, Half, or Native.".into());
+    }
+    if !matches!(prefs.fps, 30 | 60) {
+        return Err("FPS must be 30 or 60.".into());
+    }
+    if !matches!(prefs.codec.as_str(), "H.264" | "HEVC" | "AV1") {
+        return Err("Codec must be H.264, HEVC, or AV1.".into());
+    }
+    if !matches!(prefs.bitrate_mbps, 10 | 20 | 50) {
+        return Err("Max bandwidth must be 10, 20, or 50 Mb/s.".into());
+    }
+    Ok(prefs)
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamWindowStatus {
+    pub display_index: u32,
+    pub name: String,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub stream_width: u32,
+    pub stream_height: u32,
+    pub window_open: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
@@ -82,59 +184,280 @@ pub struct SessionStatus {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub scale: u32,
+    pub codec: String,
+    pub bitrate_mbps: u32,
+    pub displays: Vec<StreamWindowStatus>,
+    pub scale_options: Vec<ScaleOption>,
 }
 
-/// Holds Moonlight pair/stream children. One Connect at a time.
-pub struct SessionProcess {
+struct StreamChild {
+    child: Child,
+    display_index: usize,
+    audio: bool,
+}
+
+struct SessionInner {
     pair: Mutex<Option<Child>>,
-    stream: Mutex<Option<Child>>,
+    windows: Mutex<Vec<StreamChild>>,
     connected_ip: Mutex<Option<String>>,
+    host_displays: Mutex<Vec<DisplayInfo>>,
+    prefs: Mutex<StreamPrefs>,
+    control_port: Mutex<Option<u16>>,
+}
+
+/// Holds Moonlight pair/stream children. One Connect at a time; N stream windows.
+pub struct SessionProcess {
+    inner: Arc<SessionInner>,
 }
 
 impl SessionProcess {
     pub fn new() -> Self {
-        Self {
+        let inner = Arc::new(SessionInner {
             pair: Mutex::new(None),
-            stream: Mutex::new(None),
+            windows: Mutex::new(Vec::new()),
             connected_ip: Mutex::new(None),
-        }
+            host_displays: Mutex::new(Vec::new()),
+            prefs: Mutex::new(load_prefs()),
+            control_port: Mutex::new(None),
+        });
+        start_control_listener(Arc::clone(&inner));
+        Self { inner }
     }
 
     pub fn stop(&self) {
-        let pair = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take();
-        kill_child(pair);
-        let stream = self.stream.lock().unwrap_or_else(|e| e.into_inner()).take();
-        kill_child(stream);
-        *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.inner.stop();
     }
 
     pub fn status(&self) -> SessionStatus {
-        let connected = self.stream_still_running();
+        self.inner.status()
+    }
+
+    pub fn set_prefs(&self, prefs: StreamPrefs) -> Result<(), String> {
+        self.inner.set_prefs(prefs)
+    }
+
+    pub fn open_all_displays(&self) -> Result<(), String> {
+        self.inner.open_all_displays()
+    }
+
+    pub fn connect(&self, peer_ip: &str) -> Result<(), String> {
+        self.inner.connect(peer_ip)
+    }
+}
+
+impl SessionInner {
+    fn stop(&self) {
+        let pair = self.pair.lock().unwrap_or_else(|e| e.into_inner()).take();
+        kill_child(pair);
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in windows.drain(..) {
+            kill_child(Some(slot.child));
+        }
+        let ip = self
+            .connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(ip) = ip {
+            pairing::close_host_app(&ip);
+        }
+    }
+
+    fn reap_windows(&self) {
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        windows.retain_mut(|slot| match slot.child.try_wait() {
+            Ok(None) => true,
+            _ => false,
+        });
+        if windows.is_empty() {
+            if let Some(ip) = self
+                .connected_ip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                pairing::close_host_app(&ip);
+            }
+        }
+    }
+
+    fn status(&self) -> SessionStatus {
+        self.reap_windows();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let connected = !windows.is_empty();
         let ip = if connected {
             self.connected_ip
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
         } else {
-            *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = None;
             None
         };
+        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let scale = prefs.scale;
+        let open_indices: Vec<usize> = windows.iter().map(|w| w.display_index).collect();
+        drop(windows);
+
+        let mut displays = Vec::new();
+        let mut width = DEFAULT_WIDTH;
+        let mut height = DEFAULT_HEIGHT;
+        let mut options = Vec::new();
+        for (i, host_d) in host.iter().enumerate() {
+            let (sw, sh) = display::apply_scale(host_d.width, host_d.height, scale);
+            if i == 0 || open_indices.contains(&i) {
+                width = sw;
+                height = sh;
+            }
+            if i == 0 {
+                options = display::scale_options(host_d.width, host_d.height);
+            }
+            displays.push(StreamWindowStatus {
+                display_index: i as u32,
+                name: host_d.name.clone(),
+                native_width: host_d.width,
+                native_height: host_d.height,
+                stream_width: sw,
+                stream_height: sh,
+                window_open: open_indices.contains(&i),
+            });
+        }
+        if displays.is_empty() {
+            options = display::scale_options(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        }
         SessionStatus {
             connected,
             ip,
-            width: STREAM_WIDTH,
-            height: STREAM_HEIGHT,
-            fps: STREAM_FPS,
+            width,
+            height,
+            fps: prefs.fps,
+            scale,
+            codec: prefs.codec,
+            bitrate_mbps: prefs.bitrate_mbps,
+            displays,
+            scale_options: options,
         }
     }
 
-    pub fn connect(&self, peer_ip: &str) -> Result<(), String> {
+    fn set_prefs(&self, prefs: StreamPrefs) -> Result<(), String> {
+        let prefs = validate_prefs(prefs)?;
+        *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = prefs.clone();
+        save_prefs(&prefs);
+        let ip = self
+            .connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(ip) = ip else {
+            return Ok(());
+        };
+        let indices: Vec<(usize, bool)> = self
+            .windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|w| (w.display_index, w.audio))
+            .collect();
+        if indices.is_empty() {
+            return Ok(());
+        }
+        for (index, audio) in indices {
+            self.respawn_window(&ip, index, audio)?;
+        }
+        Ok(())
+    }
+
+    fn open_all_displays(&self) -> Result<(), String> {
+        let ip = self
+            .connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| "Not connected.".to_string())?;
+        self.refresh_host_displays(&ip);
+        let mut count = self
+            .host_displays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            .max(1);
+        const MAX_DISPLAY_WINDOWS: usize = 4;
+        if count > MAX_DISPLAY_WINDOWS {
+            eprintln!(
+                "Eclipse: opening first {MAX_DISPLAY_WINDOWS} of {count} host displays (GPU encode limit)"
+            );
+            count = MAX_DISPLAY_WINDOWS;
+        }
+        let open: Vec<usize> = self
+            .windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|w| w.display_index)
+            .collect();
+        for index in 0..count {
+            if !open.contains(&index) {
+                self.spawn_window(&ip, index, index == 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn switch_display(&self, index: usize, pid: Option<u32>) -> Result<(), String> {
+        let ip = self
+            .connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| "Not connected.".to_string())?;
+        self.refresh_host_displays(&ip);
+        let count = self
+            .host_displays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            .max(1);
+        if index >= count {
+            return Ok(());
+        }
+        let retarget = {
+            let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+            let pos = if let Some(pid) = pid {
+                windows.iter().position(|w| w.child.id() == pid)
+            } else {
+                windows.len().checked_sub(1)
+            };
+            pos.map(|p| windows.remove(p))
+        };
+        let Some(slot) = retarget else {
+            return Ok(());
+        };
+        if slot.display_index == index {
+            self.windows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(slot);
+            return Ok(());
+        }
+        kill_child(Some(slot.child));
+        self.spawn_window(&ip, index, slot.audio)?;
+        Ok(())
+    }
+
+    fn connect(&self, peer_ip: &str) -> Result<(), String> {
         let ip = peer_ip.trim();
         if ip.is_empty() {
             return Err("No peer IP.".into());
         }
         if !MOONLIGHT.is_present() {
             return Err("Moonlight sidecar is not built.".into());
+        }
+        if pairing::fetch_local_session_ip().is_some() {
+            return Err(
+                "This PC is being streamed to. Force disconnect from the streaming client first."
+                    .into(),
+            );
         }
 
         self.stop();
@@ -145,12 +468,91 @@ impl SessionProcess {
 
         pairing::ensure_host_video(ip).map_err(|err| err.into_message())?;
 
-        let child = MOONLIGHT
-            .spawn_args(&stream_args(ip))
-            .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;
-        *self.stream.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        self.refresh_host_displays(ip);
+        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let native = host.first().cloned();
+        let start_index = host.iter().position(|d| d.focused).unwrap_or(0);
+        drop(host);
+
+        let (nw, nh) = native
+            .map(|d| (d.width, d.height))
+            .unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        let client = display::local_displays();
+        let (cw, ch) = display::focused_size(&client);
+        let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        if prefs.scale == 0 {
+            prefs.scale = display::default_denominator(nw, nh, cw.unwrap_or(1920), ch.unwrap_or(1080));
+            save_prefs(&prefs);
+        }
+        drop(prefs);
         *self.connected_ip.lock().unwrap_or_else(|e| e.into_inner()) = Some(ip.to_string());
+        self.spawn_window(ip, start_index, true)?;
         Ok(())
+    }
+
+    fn refresh_host_displays(&self, ip: &str) {
+        let displays = pairing::fetch_displays(ip).unwrap_or_default();
+        *self.host_displays.lock().unwrap_or_else(|e| e.into_inner()) = displays;
+    }
+
+    fn stream_size_for(&self, display_index: usize) -> (u32, u32) {
+        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let scale = self
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scale
+            .max(1);
+        let native = host.get(display_index).or_else(|| host.first());
+        match native {
+            Some(d) => display::apply_scale(d.width, d.height, scale.max(1)),
+            None => (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        }
+    }
+
+    fn spawn_window(&self, ip: &str, display_index: usize, audio: bool) -> Result<(), String> {
+        let (width, height) = self.stream_size_for(display_index);
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let args = stream_args(ip, width, height, Some(display_index), audio, &prefs);
+        let port = *self.control_port.lock().unwrap_or_else(|e| e.into_inner());
+        let display_name = self
+            .host_displays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(display_index)
+            .map(|d| d.name.clone())
+            .filter(|n| !n.is_empty());
+        let mut env = Vec::new();
+        if let Some(port) = port {
+            env.push(("ECLIPSE_CONTROL", format!("127.0.0.1:{port}")));
+        }
+        if let Some(name) = display_name {
+            env.push(("ECLIPSE_DISPLAY_NAME", name));
+        }
+        let child = MOONLIGHT
+            .spawn_args_env(&args, &env)
+            .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;
+        self.windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(StreamChild {
+                child,
+                display_index,
+                audio,
+            });
+        Ok(())
+    }
+
+    fn respawn_window(&self, ip: &str, display_index: usize, audio: bool) -> Result<(), String> {
+        {
+            let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = windows.iter().position(|w| w.display_index == display_index)
+            {
+                let slot = windows.remove(pos);
+                kill_child(Some(slot.child));
+            }
+        }
+        self.spawn_window(ip, display_index, audio)
     }
 
     fn pair_host(&self, ip: &str) -> Result<(), String> {
@@ -192,24 +594,123 @@ impl SessionProcess {
             None => false,
         }
     }
+}
 
-    fn stream_still_running(&self) -> bool {
-        let mut slot = self.stream.lock().unwrap_or_else(|e| e.into_inner());
-        match slot.as_mut() {
-            Some(child) => match child.try_wait() {
-                Ok(None) => true,
-                Ok(Some(_)) => {
-                    *slot = None;
-                    false
+fn start_control_listener(inner: Arc<SessionInner>) {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(_) => return,
+    };
+    *inner.control_port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
+    let _ = listener.set_nonblocking(false);
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut stream) = conn else {
+                continue;
+            };
+            let Ok(clone) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(clone);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let cmd = parse_control_line(line.trim());
+            let result = match cmd {
+                ControlCmd::DisconnectAll => {
+                    inner.stop();
+                    Ok(())
                 }
-                Err(_) => {
-                    *slot = None;
-                    false
-                }
-            },
-            None => false,
+                ControlCmd::OpenAll => inner.open_all_displays(),
+                ControlCmd::SwitchDisplay { index, pid } => inner.switch_display(index, pid),
+                ControlCmd::Ignore => Ok(()),
+            };
+            let _ = writeln!(stream, "{}", if result.is_ok() { "ok" } else { "err" });
+        }
+    });
+}
+
+fn scale_pref_path() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("eclipse").join("stream-scale.json");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("eclipse")
+            .join("stream-scale.json");
+    }
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata)
+                .join("Eclipse")
+                .join("stream-scale.json");
         }
     }
+    std::env::temp_dir().join("eclipse-stream-scale.json")
+}
+
+fn load_prefs() -> StreamPrefs {
+    let mut prefs = StreamPrefs::default();
+    let text = std::fs::read_to_string(scale_pref_path()).ok();
+    let Some(text) = text else {
+        return prefs;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return prefs;
+    };
+    if let Some(n) = value
+        .get("denominator")
+        .or_else(|| value.get("scale"))
+        .and_then(|d| d.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| matches!(*n, 1 | 2 | 4))
+    {
+        prefs.scale = n;
+    }
+    if let Some(n) = value
+        .get("fps")
+        .and_then(|d| d.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| matches!(*n, 30 | 60))
+    {
+        prefs.fps = n;
+    }
+    if let Some(codec) = value.get("codec").and_then(|d| d.as_str()) {
+        if matches!(codec, "H.264" | "HEVC" | "AV1") {
+            prefs.codec = codec.to_string();
+        }
+    }
+    if let Some(n) = value
+        .get("bitrateMbps")
+        .and_then(|d| d.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| matches!(*n, 10 | 20 | 50))
+    {
+        prefs.bitrate_mbps = n;
+    }
+    prefs
+}
+
+fn save_prefs(prefs: &StreamPrefs) {
+    let path = scale_pref_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = serde_json::json!({
+        "denominator": prefs.scale,
+        "scale": prefs.scale,
+        "fps": prefs.fps,
+        "codec": prefs.codec,
+        "bitrateMbps": prefs.bitrate_mbps,
+    });
+    let _ = std::fs::write(path, body.to_string());
 }
 
 #[cfg(test)]
@@ -229,17 +730,32 @@ mod tests {
             ["pair", "100.64.0.1", "--pin", "1234"]
         );
         assert_eq!(
-            stream_args("100.64.0.1"),
+            stream_args(
+                "100.64.0.1",
+                1440,
+                960,
+                Some(0),
+                true,
+                &StreamPrefs::default()
+            ),
             [
                 "stream",
-                "--1080",
+                "--resolution",
+                "1440x960",
                 "--fps",
                 "60",
                 "--video-codec",
                 "H.264",
+                "--bitrate",
+                "20000",
                 "--no-hdr",
                 "--packet-size",
                 "1024",
+                "--absolute-mouse",
+                "--display-mode",
+                "windowed",
+                "--host-display",
+                "0",
                 "100.64.0.1",
                 "Desktop"
             ]
@@ -253,14 +769,92 @@ mod tests {
     }
 
     #[test]
+    fn connect_reports_empty_ip() {
+        let session = SessionProcess::new();
+        let err = session.connect("  ").unwrap_err();
+        assert_eq!(err, "No peer IP.");
+    }
+
+    #[test]
     fn pair_still_running_is_false_without_child() {
         let session = SessionProcess::new();
-        assert!(!session.pair_still_running());
+        assert!(!session.inner.pair_still_running());
         let status = session.status();
         assert!(!status.connected);
         assert!(status.ip.is_none());
-        assert_eq!(status.width, STREAM_WIDTH);
-        assert_eq!(status.height, STREAM_HEIGHT);
         assert_eq!(status.fps, STREAM_FPS);
+    }
+
+    #[test]
+    fn last_window_clears_connected_ip() {
+        let session = SessionProcess::new();
+        *session
+            .inner
+            .connected_ip
+            .lock()
+            .unwrap() = Some("100.64.0.1".into());
+        session.inner.reap_windows();
+        assert!(session
+            .inner
+            .connected_ip
+            .lock()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn control_line_maps_shortcuts() {
+        assert_eq!(parse_control_line("disconnect-all"), ControlCmd::DisconnectAll);
+        assert_eq!(parse_control_line("esc"), ControlCmd::DisconnectAll);
+        assert_eq!(parse_control_line("open-all"), ControlCmd::OpenAll);
+        assert_eq!(
+            parse_control_line("switch-display 2 4242"),
+            ControlCmd::SwitchDisplay {
+                index: 1,
+                pid: Some(4242),
+            }
+        );
+        assert_eq!(
+            parse_control_line("switch-display 1"),
+            ControlCmd::SwitchDisplay {
+                index: 0,
+                pid: None,
+            }
+        );
+        assert_eq!(parse_control_line("nope"), ControlCmd::Ignore);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_window_exit_keeps_session() {
+        let session = SessionProcess::new();
+        *session.inner.connected_ip.lock().unwrap() = Some("100.64.0.1".into());
+        let mut finished = std::process::Command::new("true")
+            .spawn()
+            .expect("true");
+        let _ = finished.wait();
+        let live = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        session.inner.windows.lock().unwrap().push(StreamChild {
+            child: finished,
+            display_index: 0,
+            audio: true,
+        });
+        session.inner.windows.lock().unwrap().push(StreamChild {
+            child: live,
+            display_index: 1,
+            audio: false,
+        });
+        session.inner.reap_windows();
+        assert!(session.inner.connected_ip.lock().unwrap().is_some());
+        assert_eq!(session.inner.windows.lock().unwrap().len(), 1);
+        {
+            let mut windows = session.inner.windows.lock().unwrap();
+            kill_child(windows.pop().map(|w| w.child));
+        }
+        session.inner.reap_windows();
+        assert!(session.inner.connected_ip.lock().unwrap().is_none());
     }
 }

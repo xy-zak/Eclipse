@@ -10,16 +10,19 @@ Bootstrap as of 2026-08-24, first verified on Omarchy (Arch) Linux with an AMD R
 | --- | --- |
 | Tauri 2 + React 19 + Vite + Tailwind v4 control plane | Implemented (`com.eclipse.app`) |
 | Sunshine + Moonlight-Qt as git submodules and Tauri `externalBin` sidecars | Implemented |
-| Spawn Sunshine on app start; kill it when the window exits | Implemented |
+| Spawn Sunshine on app start; kill it when the window exits | Packaged installs attach to the boot-time host service. Source/`tauri dev` spawn a child; **Quit Eclipse** kills that child. Close hides to the tray |
+| Eclipse tray (Host streaming on/off) | Implemented. Login autostart (`--tray`). Toggle stops/starts the service without disabling it at boot |
 | Engine adapter (`sidecar.rs`) isolating binary/env/health strings | Implemented |
 | Dashboard sidecar status pills | Implemented |
 | Submodule SHA pins (`vendor/PINS`) + CI check | Implemented |
 | Tailscale peer discovery (`tailscale status --json`) | Implemented |
 | Probe peer Sunshine via TCP `:47990` (500ms) | Implemented |
 | One-click Connect, automated PIN pairing, spawn Moonlight | Implemented |
-| GitHub Actions `.msi` / `.deb` / `.rpm` installers | Planned |
-| Windows Sunshine-as-service + `requireAdministrator` | Planned |
-| Linux post-install `input` group / udev into `/usr` | Helper: `scripts/linux-host-perms.sh`. Package `postinst` still planned |
+| Host UI when this PC is being streamed to (disable Connect, force disconnect) | Implemented |
+| GitHub Actions `.msi` / `.deb` / `.rpm` installers | Planned (local `scripts/package.sh` / `package.ps1` implemented) |
+| Windows `SunshineService` (sunshinesvc, delayed-auto) | Implemented. GUI does not request `requireAdministrator` |
+| Linux `eclipse-host.service` at `multi-user.target` | Implemented (`postinst` / Arch `eclipse.install` enable `--now`) |
+| Linux post-install `input` group / udev into `/usr` | Package `postinst` / Arch `eclipse.install`. Source helper: `scripts/linux-host-perms.sh` |
 
 Vendored pins are recorded in `vendor/PINS`. `scripts/check-pins.sh` and `.github/workflows/check.yml` enforce those SHAs. Do not check out Moonlight tag `v6.1.0` (it does not build against FFmpeg 8).
 
@@ -39,7 +42,7 @@ Instead of relying on centralized relay servers (like TeamViewer) or legacy bitm
 * Experience perfectly smooth, hardware-encoded video with sub-16ms input latency.
 * Never manually type an IP address, configure a router, or type a pairing PIN.
 
-Until installers exist, "install" means cloning this repository and compiling the control plane plus sidecars (see the user and development guides).
+Until GitHub Releases exist, install by building a package on that OS (`scripts/package.sh` / `package.ps1`) or compiling from source (see the user and development guides).
 
 ---
 
@@ -50,7 +53,7 @@ Until installers exist, "install" means cloning this repository and compiling th
 * **Host Streaming Engine (Bundled Sidecar):** Sunshine (C++)
 * **Client Viewing Engine (Bundled Sidecar):** Moonlight-Qt (C/C++). Moonlight-Core via FFI is a v2 option (section 9), not the current engine.
 * **Network Transport & Identity:** Tailscale (WireGuard) — OS install is a user prerequisite, not bundled. Discovery (`tailscale status --json` + TCP `:47990`) is implemented; streaming over the tailnet is planned.
-* **Streaming Protocol:** Nvidia GameStream (RTSP for handshake, custom UDP for AV/Input). Connect launches Moonlight at 1080p H.264 so Linux VAAPI hosts can emit video; a 4K HEVC request from a Windows client often yields audio-only then a false UDP 47998 error.
+* **Streaming Protocol:** Nvidia GameStream (RTSP for handshake, custom UDP for AV/Input). Stream size is Native, Half, or Quarter of the host display’s physical current mode (`--resolution WxH`, H.264). Default is Native. Eclipse does not change the host desktop mode.
 
 ---
 
@@ -63,28 +66,34 @@ The Tauri application acts as the "Control Plane" (the brain). It runs in the ba
 1. **The Host Subsystem (Sunshine):** Runs silently as a background service, ready to broadcast the screen.
 2. **The Client Subsystem (Moonlight):** Spun up on-demand as a borderless window when the user wants to view a remote screen.
 
-This symmetry allows Node A to control Node B, while Node B simultaneously controls Node A, multiplexed over the same Tailscale tunnel.
+This symmetry allows each install to host and view. When this PC is being streamed to, Connect is disabled until the inbound client is disconnected (or force-disconnected from **CLIENT**).
 
 
-**Today:** Sunshine is a child of the Eclipse process (not a systemd/Windows service). Moonlight is compiled and bundled but not spawned.
+**Today:** Packaged installs run Sunshine as a boot-time OS service. After login, an Eclipse tray can start/stop that service without disabling it at boot. Closing the window hides to the tray; **Quit Eclipse** leaves the host service running. Source trees and `tauri dev` still spawn a Sunshine child (the tray toggle controls that child).
 
 ```mermaid
 flowchart LR
-  subgraph node["Eclipse node"]
-    UI["React UI"]
-    CP["Tauri control plane"]
-    subgraph sidecar["Engine adapter"]
-      SUN["Sunshine process"]
-      MOON["Moonlight process"]
-    end
+  Boot[Machine power-on]
+  subgraph os [OS services]
+    TS[tailscaled]
+    Host[Eclipse host Sunshine]
   end
-  TS["Tailscale / WireGuard"]
-  Peer["Peer Eclipse node"]
+  subgraph session [After login]
+    Tray[Eclipse tray]
+    UI[React UI]
+    CP[Tauri control plane]
+    MOON[Moonlight process]
+  end
+  Peer[Peer Eclipse node]
+  Boot --> TS
+  Boot --> Host
+  Tray -->|"start / stop"| Host
+  Tray -->|"Open Eclipse"| UI
   UI -->|"sidecar_status / list_peers / connect"| CP
-  CP -->|"start / stop / health :47990"| SUN
+  CP -->|"attach health :47990"| Host
   CP -->|"list / pair / stream Desktop"| MOON
   CP -->|"status --json"| TS
-  SUN -->|"GameStream UDP/TCP"| TS
+  Host -->|"GameStream UDP/TCP"| TS
   MOON -->|"GameStream UDP/TCP"| TS
   TS --- Peer
 ```
@@ -122,7 +131,19 @@ Once a session is established, Tauri gets out of the way. The raw data pipeline 
 2. **Host Encoding:** The raw frame buffer is passed directly to the GPU's hardware encoder (NVENC, AMD AMF, Intel QuickSync, or Linux VA-API) and compressed into an H.264/H.265 (and AV1 where the GPU supports it) packet.
 3. **Transport:** Sunshine sends the packet via UDP to the Client over Tailscale.
 4. **Client Decoding:** Moonlight receives the packet and uses the Client OS hardware decoder (DXVA2/D3D11VA on Windows, VDPAU/VA-API on Linux).
-5. **Client Render:** Moonlight paints the decoded frame directly to an OpenGL/Vulkan/DirectX context.
+5. **Client Render:** Moonlight paints the decoded frame directly to an OpenGL/Vulkan/DirectX context. Fullscreen is borderless desktop mode with integer-scale letterboxing (never stretched pixels).
+
+Host display inventory is `GET /api/displays` on Sunshine `:47990`. Each stream window can select a host output (`--host-display`); Sunshine runs one capture+encode pipeline per output. Audio plays on the primary window only.
+
+In-stream shortcuts are **Ctrl+Alt** (consumed in Moonlight, not sent to the host; Shift is reserved for Sunshine’s F1–F12 display switch):
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+Alt+Esc | Close every client window and disconnect (quit the host Desktop app) |
+| Ctrl+Alt+F | Toggle letterboxed fullscreen on this window |
+| Ctrl+Alt+1–9 | Retarget this window to host display N |
+| Ctrl+Alt+0 | Open one client window per host display |
+| Ctrl+Alt+Q | Close this window; last window disconnects |
 
 CUDA is an optional *build* feature for Sunshine on NVIDIA hosts (`ECLIPSE_CUDA=auto|on|off`). Running NVENC does not require compiling with CUDA if the NVIDIA driver already exposes it; the bootstrap machine had no `nvcc` and used VA-API instead.
 
@@ -132,7 +153,7 @@ CUDA is an optional *build* feature for Sunshine on NVIDIA hosts (`ECLIPSE_CUDA=
 2. **Transport:** Input data is sent via a heavily prioritized, encrypted UDP control channel to the Host.
 3. **Host Injection:** Sunshine parses the input and injects it into the Host OS:
    * *Windows:* Uses the Win32 `SendInput` API.
-   * *Linux:* Uses the kernel-level `uinput` / `evdev` virtual devices. `scripts/linux-host-perms.sh` adds the user to `input` and installs udev rules; package postinst is still planned.
+   * *Linux:* Uses the kernel-level `uinput` / `evdev` virtual devices. Packages run `packaging/linux/postinst.sh` (udev, `input` group, setcap). Source trees use `scripts/linux-host-perms.sh`.
 
 ---
 
@@ -144,10 +165,11 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
 
 ### 6.1 Process Lifecycle Management
 
-* **Startup (implemented):** When Tauri boots, Rust resolves the Sunshine binary (file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`). It copies vendored assets to `{exe_dir}/share/sunshine` (the compile-time Windows assets path) and spawns Sunshine with cwd next to the binary. Failure does not abort the UI.
-* **Shutdown (implemented):** On `RunEvent::Exit`, Rust kills the Sunshine child.
-* **API Control (planned):** Tauri communicates with the local Sunshine instance via its REST API (`https://localhost:47990`) to configure resolution limits, framerates, and encoder preferences based on the user's settings in the React UI.
-* **Client Spawning (implemented):** When a connection is requested, Tauri spawns the Moonlight sidecar as `moonlight stream --1080 --video-codec H.264 --no-hdr --packet-size 1024 <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop. On Windows, Eclipse copies `resources/moonlight-runtime` (Qt/SDL/FFmpeg from `windeployqt`) beside `moonlight.exe` before spawn.
+* **Startup (implemented):** Packaged installs already have Sunshine running as a system service. Tauri probes `127.0.0.1:47990` (and the OS service name) and **attaches** if the host is up. If the service is installed but stopped (tray toggle), Eclipse does **not** spawn a competing child. Source/`tauri dev` still spawn a child when no service is present. `eclipse --tray` starts hidden with only the tray icon.
+* **Tray (implemented):** Login autostart (XDG autostart / Windows Run). Menu: Open Eclipse, Host streaming (start/stop the service or child), Quit Eclipse. Window close hides to the tray. Host toggle does not `disable` the unit, so a reboot brings the host back up.
+* **Shutdown (implemented):** On `RunEvent::Exit` (Quit from the tray), Rust kills only a Sunshine **child this process spawned**. A boot-time host service is left as the user last toggled it.
+* **API Control (implemented):** Eclipse reads host displays via Sunshine `GET /api/displays`, inbound clients via `GET /api/sessions`, and ends the Desktop app (and kicks clients) with `POST /api/apps/close`. Stream scale is a local preference (denominator 1, 2, 3…), not a Sunshine desktop-mode change.
+* **Client Spawning (implemented):** When a connection is requested, Tauri spawns one or more Moonlight sidecars as `moonlight stream --resolution WxH --fps 60 --video-codec H.264 --no-hdr --packet-size 1024 --absolute-mouse --display-mode windowed --host-display N <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop. On Windows, Eclipse copies `resources/moonlight-runtime` (Qt/SDL/FFmpeg from `windeployqt`) beside `moonlight.exe` before spawn. Moonlight talks back on `ECLIPSE_CONTROL=127.0.0.1:<port>` for Ctrl+Alt+0 / 1–9 / Esc.
 
 ---
 
@@ -164,7 +186,7 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
    * Tauri `POST`s `https://{ip}:47990/api/pin` with JSON `{"pin":"NNNN","name":"Eclipse"}` (Sunshine's field is `name`).
    * TLS accepts Sunshine's self-signed certificate. CSRF is skipped (no `Origin`/`Referer`).
    * Basic Auth is `eclipse`:`eclipse`. The POST is retried until Sunshine reports `status: true` (the handshake must already be open).
-5. **Launch Stream:** Tauri executes `moonlight stream --1080 --video-codec H.264 --no-hdr --packet-size 1024 <ip> Desktop`. Moonlight connects without a PIN screen.
+5. **Launch Stream:** Tauri executes `moonlight stream --resolution WxH --fps 60 --video-codec H.264 --no-hdr --packet-size 1024 --absolute-mouse --display-mode windowed --host-display N <ip> Desktop`. Moonlight connects without a PIN screen.
 
 ```mermaid
 sequenceDiagram
@@ -188,7 +210,7 @@ sequenceDiagram
     end
     Session->>Moon: kill pair
   end
-  Session->>Moon: stream --1080 H.264 peerIp Desktop
+  Session->>Moon: stream --resolution WxH H.264 --host-display N peerIp Desktop
   Moon-->>User: remote desktop
 ```
 
@@ -196,20 +218,23 @@ sequenceDiagram
 
 ## 8. Build, Packaging, and Distribution
 
-**Today:** local scripts. `scripts/bootstrap.sh` / `bootstrap.ps1` ready the toolchain; `scripts/build-sidecars.sh` / `build-sidecars.ps1` compile sidecars; `npm run tauri dev` runs the app. There is no GitHub Actions installer matrix yet.
+**Today:** `scripts/package.sh` / `package.ps1` produce native packages on the build machine. There is no GitHub Actions installer matrix yet.
 
-**Planned:** a CI pipeline that produces native installers encapsulating the Tauri app, frontend assets, Rust binary, and C++ sidecars.
+**Planned:** a CI pipeline that produces the same artifacts for GitHub Releases.
 
 ### 8.1 Repository Structure
 
 * `/docs`: Architecture spec, user guide, development guide.
-* `/scripts`: System bootstrap and sidecar build (Linux and Windows).
+* `/packaging`: Linux maintainer scripts, Arch PKGBUILD, Windows NSIS hooks.
+* `/scripts`: System bootstrap, sidecar build, and `package.sh` / `package.ps1`.
 * `/src`: React + Vite frontend.
 * `/src-tauri`: Rust backend, `tauri.conf.json`, capabilities.
 * `/src-tauri/binaries`: Target-specific sidecars (gitignored), e.g. `sunshine-x86_64-unknown-linux-gnu`.
 * `/src-tauri/resources/sunshine`: Copied Sunshine web/shader assets.
 * `/src-tauri/resources/sunshine-prefix`: Local CMake install prefix (gitignored).
 * `/src-tauri/resources/moonlight-runtime`: Windows Moonlight Qt/SDL/FFmpeg runtime (gitignored; produced by `windeployqt`).
+* `/src-tauri/resources/windows`: Windows `sunshinesvc.exe` (gitignored; produced by `build-sidecars.ps1`).
+* `/packaging/linux/eclipse-host.service`: systemd system unit (`WantedBy=multi-user.target`).
 
 * `/vendor/sunshine`, `/vendor/moonlight-qt`: Git submodules pinned in `vendor/PINS`.
 
@@ -235,18 +260,20 @@ flowchart TD
 ```
 
 
-### 8.2 Windows Packaging (`.msi` / `.exe`) — planned
+### 8.2 Windows Packaging (NSIS)
 
-* **Compiler:** MSVC (Microsoft Visual C++).
-* **Output:** Tauri generates a WiX Toolset `.msi` installer.
-* **Permissions:** The installer includes an Application Manifest requesting `requireAdministrator` execution level. This is critical: Sunshine *must* be installed as a Windows Service to allow the application to capture the Windows Lock Screen and bypass UAC prompts.
+* **Compiler:** MSVC (Moonlight) + MSYS2 UCRT64 (Sunshine), same as developer bootstrap.
+* **Output:** `.\scripts\package.ps1` runs `tauri build --bundles nsis` → `Eclipse_*_x64-setup.exe`.
+* **Host service:** NSIS installs `tools/sunshinesvc.exe` as Windows service `SunshineService` (display name Eclipse Host, `delayed-auto`). Authenticated Users may start/stop it (ACL). HKLM Run starts `eclipse.exe --tray` at login. Uninstall stops the service and removes the Run key.
+* **Permissions:** The installer is per-machine so it can add GameStream firewall rules and the host service. The running GUI does not request `requireAdministrator`.
 
-### 8.3 Linux Packaging (`.deb` / `.rpm` / `AppImage`) — planned
+### 8.3 Linux Packaging (`.deb` / `.rpm` / Arch)
 
-* **Compiler:** Ubuntu latest runner (plus Arch/Fedora as needed).
-* **Dependencies:** `src-tauri/tauri.conf.json` already lists a first cut of deb depends (`libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`, `librsvg2-2`, `libavcodec60`, `libva2`, `pipewire`, `libwayland-client0`, Qt 6, SDL2). These must be kept in sync with actual sidecar linkage.
-* **Output:** Native `.deb` and `.rpm` packages; AppImage if Qt can be bundled reliably.
-* **Permissions:** A post-install script runs to configure `/dev/uinput` permissions (adding the user to the `input` group) so Sunshine can inject mouse movements without running as root.
+* **Build host:** Debian/Ubuntu 24.04 for `.deb`, Fedora for `.rpm`, Arch for `.pkg.tar.zst`. Linkage is distro-specific.
+* **Dependencies:** `src-tauri/tauri.conf.json` lists deb and rpm depends. Arch depends live in `packaging/arch/PKGBUILD`. CUDA toolkit is never a package dependency; NVIDIA **driver** is optional (`nvidia-utils` optdepend on Arch).
+* **Output:** `./scripts/package.sh` (deb / rpm / makepkg).
+* **Host service:** Packages install `eclipse-host.service` (`WantedBy=multi-user.target`) and `modules-load.d` for `uinput`/`uhid`. Config lives in `/etc/eclipse/sunshine`. Capture stays on **auto** (KMS fallback before login). A polkit helper (`eclipse-hostctl`) lets the tray start/stop the unit. `/etc/xdg/autostart/eclipse-tray.desktop` launches `eclipse --tray`.
+* **Permissions:** `packaging/linux/postinst.sh` (and Arch `eclipse.install`) install udev rules, `setcap` Sunshine, add users to `input`, seed Web UI creds, and `systemctl enable --now eclipse-host.service`.
 
 ---
 

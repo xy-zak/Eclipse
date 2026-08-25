@@ -34,3 +34,10 @@ src-tauri/resources/sunshine/*
 src-tauri/resources/sunshine-prefix/
 src-tauri/resources/moonlight-runtime/*
 !src-tauri/resources/moonlight-runtime/.gitkeep
+src-tauri/resources/windows/*
+!src-tauri/resources/windows/.gitkeep
+
+# Local package output
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.pkg.tar.*

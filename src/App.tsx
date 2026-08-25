@@ -1,41 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { currentMonitor } from "@tauri-apps/api/window";
-import { Eclipse, Loader2, Moon, RefreshCw, Sun, Wifi } from "lucide-react";
 import { Button } from "./components/Button";
-import { ClientPanel } from "./components/ClientPanel";
+import { ClientPanel, type ClientLink } from "./components/ClientPanel";
 import { HostPanel } from "./components/HostPanel";
+import { InfoPopover } from "./components/InfoPopover";
+import { PixelIcon } from "./components/PixelIcon";
 import { StatusMark } from "./components/StatusMark";
+import { StreamSettings } from "./components/StreamSettings";
 import { TitleBar } from "./components/TitleBar";
 import type {
   DiscoverySnapshot,
-  LocalNode,
+  InboundStream,
   SessionStatus,
   SidecarStatus,
+  StreamPrefs,
 } from "./types";
 
-function fallbackResolution(): string {
-  if (typeof window === "undefined") {
-    return "—";
-  }
-  const dpr = window.devicePixelRatio || 1;
-  return `${Math.round(window.screen.width * dpr)}×${Math.round(window.screen.height * dpr)}`;
-}
-
-async function clientResolution(local: LocalNode | null): Promise<string> {
-  if (local?.displayWidth && local?.displayHeight) {
-    return `${local.displayWidth}×${local.displayHeight}`;
-  }
-  try {
-    const mon = await currentMonitor();
-    if (mon?.size.width && mon.size.height) {
-      return `${mon.size.width}×${mon.size.height}`;
-    }
-  } catch {
-    // Permission or runtime without a window; use CSS pixels × DPR.
-  }
-  return fallbackResolution();
-}
+const DEFAULT_PREFS: StreamPrefs = {
+  scale: 1,
+  fps: 60,
+  codec: "H.264",
+  bitrateMbps: 20,
+};
 
 function formatMbps(mbps: number | null): string {
   if (mbps === null || !Number.isFinite(mbps)) {
@@ -47,16 +33,40 @@ function formatMbps(mbps: number | null): string {
   return `${mbps.toFixed(1)} Mb/s`;
 }
 
+function peerLink(
+  peers: { hostname: string; ip: string }[],
+  ip: string | null | undefined,
+): ClientLink | null {
+  if (!ip) {
+    return null;
+  }
+  const peer = peers.find((p) => p.ip === ip);
+  return { hostname: peer?.hostname ?? null, ip };
+}
+
+function prefsFromSession(session: SessionStatus | null): StreamPrefs {
+  if (!session) {
+    return DEFAULT_PREFS;
+  }
+  return {
+    scale: session.scale,
+    fps: session.fps,
+    codec: session.codec || DEFAULT_PREFS.codec,
+    bitrateMbps: session.bitrateMbps || DEFAULT_PREFS.bitrateMbps,
+  };
+}
+
 export default function App() {
   const [status, setStatus] = useState<SidecarStatus | null>(null);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [session, setSession] = useState<SessionStatus | null>(null);
+  const [inbound, setInbound] = useState<InboundStream | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshPulse, setRefreshPulse] = useState(0);
   const [connectingIp, setConnectingIp] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
-  const [resolution, setResolution] = useState(fallbackResolution);
   const traffic = useRef<{ t: number; bytes: number } | null>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -95,17 +105,14 @@ export default function App() {
     invoke<SidecarStatus>("sidecar_status")
       .then(setStatus)
       .catch((err: unknown) => setError(String(err)));
+    invoke<SessionStatus>("session_status")
+      .then(setSession)
+      .catch(() => {});
+    invoke<InboundStream | null>("inbound_status")
+      .then(setInbound)
+      .catch(() => setInbound(null));
     refreshPeers(true);
   }, [refreshPeers]);
-
-  useEffect(() => {
-    const update = () => {
-      void clientResolution(discovery?.local ?? null).then(setResolution);
-    };
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, [discovery?.local]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -113,6 +120,9 @@ export default function App() {
       invoke<SessionStatus>("session_status")
         .then(setSession)
         .catch(() => {});
+      invoke<InboundStream | null>("inbound_status")
+        .then(setInbound)
+        .catch(() => setInbound(null));
     }, 1000);
     return () => window.clearInterval(id);
   }, []);
@@ -153,77 +163,123 @@ export default function App() {
         traffic.current = null;
         setThroughputMbps(null);
         setLatencyMs(null);
-        setSession({ connected: false, ip: null, width: 1920, height: 1080, fps: 60 });
+        invoke<SessionStatus>("session_status").then(setSession).catch(() => {});
       })
+      .catch((err: unknown) => setError(String(err)));
+  };
+
+  const forceDisconnectInbound = () => {
+    setError(null);
+    invoke("force_disconnect_inbound")
+      .then(() => {
+        setInbound(null);
+        invoke<InboundStream | null>("inbound_status")
+          .then(setInbound)
+          .catch(() => setInbound(null));
+      })
+      .catch((err: unknown) => setError(String(err)));
+  };
+
+  const setPrefs = (prefs: StreamPrefs) => {
+    setError(null);
+    invoke("set_stream_prefs", { prefs })
+      .then(() => invoke<SessionStatus>("session_status").then(setSession))
       .catch((err: unknown) => setError(String(err)));
   };
 
   const peers = discovery?.peers ?? [];
   const moonlightReady = Boolean(status?.moonlightPresent);
   const sunshineReady = Boolean(status?.sunshinePresent && status.sunshineRunning);
-  const hostResolution = session
-    ? `${session.width}×${session.height}`
-    : "1920×1080";
+  const streamResolution = session?.connected
+    ? session.displays
+        .filter((d) => d.windowOpen)
+        .map((d) => {
+          const scale =
+            session.scale === 4
+              ? " (quarter)"
+              : session.scale === 2
+                ? " (half)"
+                : session.scale === 1
+                  ? " (native)"
+                  : "";
+          return `${d.nativeWidth}×${d.nativeHeight} → ${d.streamWidth}×${d.streamHeight}${scale}`;
+        })
+        .join(", ") || `${session.width}×${session.height}`
+    : "—";
+  const prefs = prefsFromSession(session);
+  const inboundLink = peerLink(peers, inbound?.ip);
+  const controllingLink =
+    session?.connected ? peerLink(peers, session.ip) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-eclipse text-moonlight">
+    <div className="font-body flex h-full min-h-0 flex-col overflow-hidden bg-eclipse text-moonlight">
       <TitleBar />
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 overflow-y-auto px-8 py-8">
-        <header className="flex flex-col items-center text-center">
-          <h1 className="font-title flex items-center gap-3 text-5xl font-semibold tracking-tight">
-            <Eclipse size={40} strokeWidth={1.75} />
+      <main className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto">
+        <div className="mx-auto flex w-full min-w-0 max-w-[1080px] flex-col gap-8 px-6 py-6 sm:px-8 sm:py-8">
+        <header className="flex shrink-0 flex-col items-center text-center">
+          <h1 className="font-title text-6xl font-normal uppercase tracking-tight sm:text-7xl">
             Eclipse
           </h1>
           <div className="mt-4 flex flex-wrap justify-center gap-x-8 gap-y-2">
             <StatusMark
               ok={sunshineReady}
               label="Sunshine"
-              icon={<Sun size={16} strokeWidth={2} />}
+              icon={<PixelIcon name="sun-solid" size={16} />}
             />
             <StatusMark
               ok={moonlightReady}
               label="Moonlight"
-              icon={<Moon size={16} strokeWidth={2} />}
-            />
-            <StatusMark
-              ok={Boolean(discovery?.local?.tailscaleOnline)}
-              label="Tailscale"
-              icon={<Wifi size={16} strokeWidth={2} />}
+              icon={<PixelIcon name="moon-solid" size={16} />}
             />
           </div>
         </header>
 
-        <section className="flex flex-col gap-4">
-            <h2 className="font-title flex items-center gap-2 text-2xl font-semibold tracking-tight text-moonlight">
-            <Moon size={22} strokeWidth={2} />
-            Client
-          </h2>
+        <section className="flex min-w-0 flex-col gap-4">
+          <div className="flex min-h-9 items-center justify-between gap-3">
+            <h2 className="min-w-0 flex-1 text-sm leading-snug font-medium tracking-widest text-moonlight/70">
+              CLIENT [ this computer ]
+            </h2>
+            <InfoPopover />
+          </div>
           <ClientPanel
             local={discovery?.local ?? null}
-            resolution={resolution}
-            streamFps={session?.fps ?? 60}
+            tailscaleOnline={Boolean(discovery?.local?.tailscaleOnline)}
+            eclipseOnline={sunshineReady}
+            inbound={inboundLink}
+            controlling={controllingLink}
+            onForceDisconnect={forceDisconnectInbound}
           />
         </section>
 
-        <section className="flex flex-col gap-4">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="font-title flex items-center gap-2 text-2xl font-semibold tracking-tight text-sunshine">
-              <Sun size={22} strokeWidth={2} />
-              Hosts
+        <div aria-hidden className="h-px" />
+
+        <section className="flex min-w-0 flex-col gap-4">
+          <div className="flex min-h-9 items-center justify-between gap-3">
+            <h2 className="min-w-0 flex-1 text-sm leading-snug font-medium tracking-widest text-moonlight/70">
+              HOSTS [ remote-desktop target computers ]
             </h2>
-            <Button
-              variant="ghost"
-              className="h-9 w-9 border-sunshine px-0 text-sunshine hover:bg-sunshine hover:text-eclipse disabled:border-sunshine disabled:text-sunshine"
-              aria-label="Refresh"
-              onClick={() => refreshPeers(true)}
-              disabled={loading}
-            >
-              {loading ? (
-                <Loader2 size={16} strokeWidth={2} className="animate-spin" />
-              ) : (
-                <RefreshCw size={16} strokeWidth={2} />
-              )}
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <StreamSettings
+                prefs={prefs}
+                hosts={peers.filter(
+                  (peer) => peer.hostOnline && peer.displays.length > 0,
+                )}
+                disabled={connectingIp !== null || inbound !== null}
+                onChange={setPrefs}
+              />
+              <Button
+                variant="ghost"
+                className="h-9 w-9 border-sunshine px-0 text-sunshine hover:bg-sunshine hover:text-eclipse disabled:border-sunshine disabled:text-sunshine"
+                aria-label="Refresh"
+                onClick={() => {
+                  setRefreshPulse((n) => n + 1);
+                  refreshPeers(true);
+                }}
+                disabled={loading}
+              >
+                <PixelIcon name="spinner" size={16} />
+              </Button>
+            </div>
           </div>
 
           {!discovery?.tailscaleOk && discovery?.message ? (
@@ -240,10 +296,16 @@ export default function App() {
           ) : null}
 
           {peers.map((peer) => {
-            const connected = Boolean(session?.connected && session.ip === peer.ip);
+            const connected = Boolean(
+              session?.connected && session.ip === peer.ip,
+            );
             const connecting = connectingIp === peer.ip;
             const canConnect =
-              peer.hostOnline && moonlightReady && connectingIp === null && !session?.connected;
+              peer.hostOnline &&
+              moonlightReady &&
+              connectingIp === null &&
+              !session?.connected &&
+              inbound === null;
             return (
               <HostPanel
                 key={`${peer.hostname}-${peer.ip}`}
@@ -252,20 +314,24 @@ export default function App() {
                 connecting={connecting}
                 canConnect={canConnect}
                 throughput={connected ? formatMbps(throughputMbps) : "—"}
-                hostResolution={connected ? hostResolution : "—"}
+                streamResolution={connected ? streamResolution : "—"}
                 latency={
                   connected && latencyMs != null ? `${latencyMs} ms` : "—"
                 }
                 onConnect={() => connect(peer.ip)}
                 onDisconnect={disconnect}
+                flashKey={refreshPulse}
               />
             );
           })}
 
           {error ? (
-            <p className="border border-fail px-4 py-3 text-sm text-fail">{error}</p>
+            <p className="border border-fail px-4 py-3 text-sm text-fail">
+              {error}
+            </p>
           ) : null}
         </section>
+        </div>
       </main>
     </div>
   );

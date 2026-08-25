@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=Network;Utility;
+Comment=Peer-to-peer remote desktop
+Exec=eclipse
+Icon=eclipse
+Name=Eclipse
+Terminal=false
+Type=Application
+StartupWMClass=eclipse

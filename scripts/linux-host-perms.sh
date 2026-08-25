@@ -74,7 +74,8 @@ list_sunshine_bins() {
   for f in \
     "${ROOT}/src-tauri/binaries/sunshine-"* \
     "${ROOT}/src-tauri/target/debug/sunshine" \
-    "${ROOT}/src-tauri/target/release/sunshine"
+    "${ROOT}/src-tauri/target/release/sunshine" \
+    /usr/bin/sunshine
   do
     [[ -f "${f}" && -x "${f}" ]] || continue
     [[ "${f}" == *.exe ]] && continue

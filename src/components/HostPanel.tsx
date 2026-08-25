@@ -1,7 +1,7 @@
-import { Eclipse, Gauge, Loader2, Plug, Sun, Timer, Unplug, Wifi } from "lucide-react";
-import type { Peer } from "../types";
+import type { DisplayInfo, Peer } from "../types";
 import { Button } from "./Button";
 import { InfoRow, Panel } from "./Panel";
+import { PixelIcon } from "./PixelIcon";
 import { StatusMark } from "./StatusMark";
 
 type Props = {
@@ -10,10 +10,11 @@ type Props = {
   connecting: boolean;
   canConnect: boolean;
   throughput: string;
-  hostResolution: string;
+  streamResolution: string;
   latency: string;
   onConnect: () => void;
   onDisconnect: () => void;
+  flashKey?: number;
 };
 
 function dash(value: string | null | undefined): string {
@@ -23,26 +24,39 @@ function dash(value: string | null | undefined): string {
   return value;
 }
 
+function formatDisplays(displays: DisplayInfo[]): string {
+  if (!displays.length) {
+    return "—";
+  }
+  return displays
+    .map((d) =>
+      d.name ? `${d.name} ${d.width}×${d.height}` : `${d.width}×${d.height}`,
+    )
+    .join(", ");
+}
+
 export function HostPanel({
   peer,
   connected,
   connecting,
   canConnect,
   throughput,
-  hostResolution,
+  streamResolution,
   latency,
   onConnect,
   onDisconnect,
+  flashKey = 0,
 }: Props) {
   return (
     <Panel
       accent="sunshine"
       title={peer.hostname}
-      icon={<Sun size={16} strokeWidth={2} />}
+      icon={<PixelIcon name="sun-solid" size={16} />}
+      className="overflow-hidden"
       actions={
         connected ? (
           <Button variant="fail" onClick={onDisconnect}>
-            <Unplug size={14} strokeWidth={2} />
+            <PixelIcon name="times-circle" size={14} />
             Disconnect
           </Button>
         ) : (
@@ -52,28 +66,38 @@ export function HostPanel({
             onClick={onConnect}
           >
             {connecting ? (
-              <Loader2 size={14} strokeWidth={2} className="animate-spin" />
+              <PixelIcon name="spinner" size={14} className="animate-spin" />
             ) : (
-              <Plug size={14} strokeWidth={2} />
+              <PixelIcon name="check-circle" size={14} />
             )}
             {connecting ? "Connecting…" : "Connect"}
           </Button>
         )
       }
     >
+      {flashKey > 0 ? (
+        <div
+          key={flashKey}
+          className="eclipse-host-flash pointer-events-none absolute inset-0 z-10 bg-sunshine"
+        />
+      ) : null}
       <InfoRow label="Operating system" value={dash(peer.os)} />
       <InfoRow label="Tailscale IP" value={peer.ip} />
+      <InfoRow
+        label="Host displays"
+        value={peer.hostOnline ? formatDisplays(peer.displays) : "—"}
+      />
       <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-sunshine pt-4">
         <StatusMark
           ok={peer.tailscaleOnline}
           label="Tailscale"
-          icon={<Wifi size={14} strokeWidth={2} />}
+          icon={<PixelIcon name="chart-network" size={14} />}
           tone="sunshine"
         />
         <StatusMark
           ok={peer.hostOnline}
           label="Eclipse"
-          icon={<Eclipse size={14} strokeWidth={2} />}
+          icon={<PixelIcon name="sparkles-solid" size={14} />}
           tone="sunshine"
         />
       </div>
@@ -82,14 +106,14 @@ export function HostPanel({
       <InfoRow
         label="Throughput"
         value={throughput}
-        icon={<Gauge size={14} strokeWidth={2} />}
+        icon={<PixelIcon name="analytics" size={14} />}
         accent="sunshine"
       />
-      <InfoRow label="Host resolution" value={hostResolution} />
+      <InfoRow label="Stream" value={streamResolution} />
       <InfoRow
         label="Ping"
         value={latency}
-        icon={<Timer size={14} strokeWidth={2} />}
+        icon={<PixelIcon name="clock" size={14} />}
         accent="sunshine"
       />
         </div>

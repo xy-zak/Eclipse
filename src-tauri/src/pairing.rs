@@ -1,8 +1,9 @@
-//! Automated GameStream PIN pairing.
+//! Automated GameStream PIN pairing and local host session control.
 //!
 //! Moonlight starts the handshake (`moonlight pair --pin`); this module POSTs
-//! the same PIN to the remote Sunshine Web UI at `/api/pin`. HTTP details stay
-//! here so an API change does not leak into React.
+//! the same PIN to the remote Sunshine Web UI at `/api/pin`. Inbound stream
+//! status is `GET /api/sessions` on localhost. HTTP details stay here so an
+//! API change does not leak into React.
 
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -45,6 +46,22 @@ pub fn pin_url(host: &str) -> String {
 pub fn logs_url(host: &str) -> String {
     format!("https://{host}:{}/api/logs", sunshine_ui_port())
 }
+
+pub fn displays_url(host: &str) -> String {
+    format!("https://{host}:{}/api/displays", sunshine_ui_port())
+}
+
+pub fn sessions_url(host: &str) -> String {
+    format!("https://{host}:{}/api/sessions", sunshine_ui_port())
+}
+
+pub fn apps_close_url(host: &str) -> String {
+    format!("https://{host}:{}/api/apps/close", sunshine_ui_port())
+}
+
+const LOCAL_HOST: &str = "127.0.0.1";
+const SESSION_REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
+const CLOSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn sunshine_ui_port() -> u16 {
     SUNSHINE.health().map(|h| h.port).unwrap_or(47990)
@@ -169,7 +186,10 @@ pub fn submit_pin(host: &str, pin: &str, name: &str) -> Result<bool, PinError> {
     let value: serde_json::Value = response
         .json()
         .map_err(|err| PinError::Other(format!("PIN response was not JSON: {err}")))?;
-    Ok(value.get("status").and_then(|v| v.as_bool()).unwrap_or(false))
+    Ok(value
+        .get("status")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
 }
 
 pub fn submit_pin_until_accepted(host: &str, pin: &str, name: &str) -> Result<(), PinError> {
@@ -205,6 +225,145 @@ pub fn ensure_host_video(host: &str) -> Result<(), PinError> {
     Ok(())
 }
 
+/// GET `/api/displays`. Missing endpoint (old Sunshine) yields an empty list.
+pub fn fetch_displays(host: &str) -> Option<Vec<crate::display::DisplayInfo>> {
+    let client = http_client().ok()?;
+    let response = client
+        .get(displays_url(host))
+        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
+        .timeout(Duration::from_millis(400))
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value: serde_json::Value = response.json().ok()?;
+    Some(parse_displays_payload(&value))
+}
+
+pub fn parse_displays_payload(value: &serde_json::Value) -> Vec<crate::display::DisplayInfo> {
+    let Some(arr) = value.get("displays").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, item) in arr.iter().enumerate() {
+        let width = item.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let height = item.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if width == 0 || height == 0 {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let focused = item
+            .get("focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(i == 0);
+        out.push(crate::display::DisplayInfo {
+            name: if name.is_empty() {
+                format!("Display {}", i + 1)
+            } else {
+                name
+            },
+            width,
+            height,
+            focused,
+        });
+    }
+    out
+}
+
+/// POST `/api/apps/close` so the host Desktop app ends with the last client window.
+pub fn close_host_app(host: &str) {
+    let _ = close_host_app_result(host);
+}
+
+/// POST `/api/apps/close` and surface HTTP failures (used by force-disconnect).
+pub fn close_host_app_result(host: &str) -> Result<(), String> {
+    let client = http_client().map_err(|err| err.into_message())?;
+    let response = client
+        .post(apps_close_url(host))
+        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
+        .timeout(CLOSE_REQUEST_TIMEOUT)
+        .send()
+        .map_err(|err| format!("Force disconnect failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Force disconnect returned {status}."));
+    }
+    Ok(())
+}
+
+pub fn normalize_client_ip(ip: &str) -> String {
+    let ip = ip.trim();
+    if let Some(v4) = ip.strip_prefix("::ffff:") {
+        return v4.to_string();
+    }
+    if let Some(rest) = ip.strip_prefix("[::ffff:") {
+        return rest.trim_end_matches(']').to_string();
+    }
+    ip.to_string()
+}
+
+pub fn parse_sessions_payload(value: &serde_json::Value) -> Vec<String> {
+    let Some(arr) = value.get("sessions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let raw = if let Some(ip) = item.get("ip").and_then(|v| v.as_str()) {
+            ip
+        } else if let Some(ip) = item.as_str() {
+            ip
+        } else {
+            continue;
+        };
+        let ip = normalize_client_ip(raw);
+        if ip.is_empty() || out.iter().any(|existing| existing == &ip) {
+            continue;
+        }
+        out.push(ip);
+    }
+    out
+}
+
+/// GET `/api/sessions` on this machine's Sunshine. Missing endpoint yields None.
+pub fn fetch_local_session_ip() -> Option<String> {
+    fetch_session_ips(LOCAL_HOST)?.into_iter().next()
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboundStream {
+    pub ip: String,
+}
+
+pub fn local_inbound() -> Option<InboundStream> {
+    fetch_local_session_ip().map(|ip| InboundStream { ip })
+}
+
+fn fetch_session_ips(host: &str) -> Option<Vec<String>> {
+    let client = http_client().ok()?;
+    let response = client
+        .get(sessions_url(host))
+        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
+        .timeout(SESSION_REQUEST_TIMEOUT)
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value: serde_json::Value = response.json().ok()?;
+    Some(parse_sessions_payload(&value))
+}
+
+/// Kick every inbound Moonlight session on this host.
+pub fn force_disconnect_inbound() -> Result<(), String> {
+    close_host_app_result(LOCAL_HOST)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +373,66 @@ mod tests {
         assert_eq!(pin_url("100.64.0.2"), "https://100.64.0.2:47990/api/pin");
         assert_eq!(pin_url("127.0.0.1"), "https://127.0.0.1:47990/api/pin");
         assert_eq!(logs_url("100.64.0.2"), "https://100.64.0.2:47990/api/logs");
+        assert_eq!(
+            displays_url("100.64.0.2"),
+            "https://100.64.0.2:47990/api/displays"
+        );
+        assert_eq!(
+            sessions_url("127.0.0.1"),
+            "https://127.0.0.1:47990/api/sessions"
+        );
+        assert_eq!(
+            apps_close_url("127.0.0.1"),
+            "https://127.0.0.1:47990/api/apps/close"
+        );
+    }
+
+    #[test]
+    fn parse_sessions_payload_dedupes_and_normalizes() {
+        let value = serde_json::json!({
+            "status": true,
+            "sessions": [
+                {"ip": "100.64.0.2"},
+                {"ip": "::ffff:100.64.0.2"},
+                {"ip": "100.64.0.9"},
+                "100.64.0.9"
+            ]
+        });
+        assert_eq!(
+            parse_sessions_payload(&value),
+            ["100.64.0.2", "100.64.0.9"]
+        );
+    }
+
+    #[test]
+    fn parse_sessions_payload_empty_without_array() {
+        assert!(parse_sessions_payload(&serde_json::json!({"status": true})).is_empty());
+    }
+
+    #[test]
+    fn normalize_client_ip_strips_v4_mapped() {
+        assert_eq!(normalize_client_ip("::ffff:100.64.0.2"), "100.64.0.2");
+        assert_eq!(normalize_client_ip("[::ffff:100.64.0.2]"), "100.64.0.2");
+        assert_eq!(normalize_client_ip(" 100.64.0.2 "), "100.64.0.2");
+    }
+
+    #[test]
+    fn parse_displays_payload_skips_zero_size() {
+        let value = serde_json::json!({
+            "status": true,
+            "displays": [
+                {"index": 0, "name": "eDP-1", "width": 2880, "height": 1920, "focused": true},
+                {"index": 1, "name": "HDMI-A-1", "width": 0, "height": 0, "focused": false},
+                {"index": 2, "name": "DP-1", "width": 1920, "height": 1080, "focused": false}
+            ]
+        });
+        let displays = parse_displays_payload(&value);
+        assert_eq!(displays.len(), 2);
+        assert_eq!(displays[0].name, "eDP-1");
+        assert_eq!(displays[0].width, 2880);
+        assert!(displays[0].focused);
+        assert_eq!(displays[1].name, "DP-1");
+        assert!(!displays[1].focused);
     }
 
     #[test]

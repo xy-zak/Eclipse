@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/sunshine": "share/sunshine",
+      "resources/moonlight-runtime": "moonlight-runtime",
+      "resources/windows/sunshinesvc.exe": "tools/sunshinesvc.exe",
+      "../packaging/windows/grant-host-acl.cmd": "grant-host-acl.cmd"
+    }
+  }
+}

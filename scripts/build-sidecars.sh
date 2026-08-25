@@ -137,6 +137,7 @@ cmake -S "${SUNSHINE_SRC}" -B "${BUILD_SUN}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
   -DSUNSHINE_ASSETS_DIR=share/sunshine \
+  -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine \
   -DBUILD_DOCS=OFF \
   -DBUILD_TESTS=OFF \
   -DBUILD_WERROR=OFF \
@@ -168,11 +169,11 @@ echo "Installed ${BIN_DIR}/sunshine-${TRIPLE}"
 
 echo "==> Building Moonlight"
 mkdir -p "${MOONLIGHT_SRC}/app/res/eclipse"
-if [[ ! -f "${ROOT}/assets/fonts/Archivo-SemiBold.ttf" || ! -f "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" ]]; then
-  echo "Missing Eclipse fonts in assets/fonts (Archivo-SemiBold.ttf, JetBrainsMono-Regular.ttf)" >&2
+if [[ ! -f "${ROOT}/assets/fonts/Remboy-Regular.ttf" || ! -f "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" ]]; then
+  echo "Missing Eclipse fonts in assets/fonts (Remboy-Regular.ttf, JetBrainsMono-Regular.ttf)" >&2
   exit 1
 fi
-cp "${ROOT}/assets/fonts/Archivo-SemiBold.ttf" "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" \
+cp "${ROOT}/assets/fonts/Remboy-Regular.ttf" "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" \
   "${MOONLIGHT_SRC}/app/res/eclipse/"
 pushd "${BUILD_MOON}" >/dev/null
 qmake6 "${MOONLIGHT_SRC}/moonlight-qt.pro" CONFIG+=release

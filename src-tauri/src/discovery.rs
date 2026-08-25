@@ -10,6 +10,8 @@ use std::net::{IpAddr, UdpSocket};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::display::{self, DisplayInfo};
+use crate::pairing;
 use crate::sidecar::{probe_tcp_ms, SUNSHINE};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -25,6 +27,7 @@ pub struct Peer {
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
     pub os: String,
+    pub displays: Vec<DisplayInfo>,
 }
 
 /// This machine, as shown in the Client panel.
@@ -38,8 +41,7 @@ pub struct LocalNode {
     pub link_speed_mbps: Option<u32>,
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
-    pub display_width: Option<u32>,
-    pub display_height: Option<u32>,
+    pub displays: Vec<DisplayInfo>,
     pub os: String,
 }
 
@@ -104,7 +106,10 @@ struct Draft {
 }
 
 pub fn list_peers() -> DiscoverySnapshot {
-    let output = match Command::new("tailscale").args(["status", "--json"]).output() {
+    let output = match Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+    {
         Ok(out) => out,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return DiscoverySnapshot::fail(
@@ -172,14 +177,23 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
 
     let peers = drafts
         .into_iter()
-        .map(|d| Peer {
-            host_online: probe && SUNSHINE.probe_at(&d.ip, PROBE_TIMEOUT),
-            hostname: d.hostname,
-            ip: d.ip,
-            tailscale_online: d.tailscale_online,
-            rx_bytes: d.rx_bytes,
-            tx_bytes: d.tx_bytes,
-            os: d.os,
+        .map(|d| {
+            let host_online = probe && SUNSHINE.probe_at(&d.ip, PROBE_TIMEOUT);
+            let displays = if host_online {
+                pairing::fetch_displays(&d.ip).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            Peer {
+                host_online,
+                hostname: d.hostname,
+                ip: d.ip,
+                tailscale_online: d.tailscale_online,
+                rx_bytes: d.rx_bytes,
+                tx_bytes: d.tx_bytes,
+                os: d.os,
+                displays,
+            }
         })
         .collect();
 
@@ -193,7 +207,6 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
 
 fn local_from_self(node: &NodeJson) -> LocalNode {
     let hostname = node_hostname(node).unwrap_or_else(|| os_hostname());
-    let (display_width, display_height) = display_size();
     LocalNode {
         hostname,
         lan_ip: lan_ipv4(),
@@ -202,8 +215,7 @@ fn local_from_self(node: &NodeJson) -> LocalNode {
         link_speed_mbps: link_speed_mbps(),
         rx_bytes: node.rx_bytes,
         tx_bytes: node.tx_bytes,
-        display_width,
-        display_height,
+        displays: display::local_displays(),
         os: {
             let from_ts = format_os(node.os.as_deref());
             if from_ts.is_empty() {
@@ -216,7 +228,6 @@ fn local_from_self(node: &NodeJson) -> LocalNode {
 }
 
 fn local_without_tailscale() -> LocalNode {
-    let (display_width, display_height) = display_size();
     LocalNode {
         hostname: os_hostname(),
         lan_ip: lan_ipv4(),
@@ -225,8 +236,7 @@ fn local_without_tailscale() -> LocalNode {
         link_speed_mbps: link_speed_mbps(),
         rx_bytes: None,
         tx_bytes: None,
-        display_width,
-        display_height,
+        displays: display::local_displays(),
         os: native_os(),
     }
 }
@@ -413,82 +423,6 @@ fn link_speed_mbps() -> Option<u32> {
     }
 }
 
-/// Physical pixel size of the focused (or largest) display.
-fn display_size() -> (Option<u32>, Option<u32>) {
-    if let Some((w, h)) = os_display_size() {
-        (Some(w), Some(h))
-    } else {
-        (None, None)
-    }
-}
-
-fn os_display_size() -> Option<(u32, u32)> {
-    #[cfg(target_os = "linux")]
-    {
-        hyprctl_focused_size().or_else(drm_preferred_mode)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn hyprctl_focused_size() -> Option<(u32, u32)> {
-    let out = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_hyprctl_monitors(&String::from_utf8_lossy(&out.stdout))
-}
-
-fn parse_hyprctl_monitors(json: &str) -> Option<(u32, u32)> {
-    let monitors: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
-    let focused = monitors
-        .iter()
-        .find(|m| m.get("focused").and_then(|v| v.as_bool()) == Some(true))
-        .or_else(|| monitors.first())?;
-    let w = focused.get("width")?.as_u64()? as u32;
-    let h = focused.get("height")?.as_u64()? as u32;
-    if w == 0 || h == 0 {
-        return None;
-    }
-    Some((w, h))
-}
-
-#[cfg(target_os = "linux")]
-fn drm_preferred_mode() -> Option<(u32, u32)> {
-    let drm = fs::read_dir("/sys/class/drm").ok()?;
-    let mut best: Option<(u32, u32)> = None;
-    for entry in drm {
-        let path = entry.ok()?.path();
-        let name = path.file_name()?.to_string_lossy();
-        if !name.contains('-') {
-            continue;
-        }
-        let status = fs::read_to_string(path.join("status")).unwrap_or_default();
-        if status.trim() != "connected" {
-            continue;
-        }
-        let modes = fs::read_to_string(path.join("modes")).ok()?;
-        let first = modes.lines().next()?;
-        let (w_s, h_s) = first.split_once('x')?;
-        let w: u32 = w_s.parse().ok()?;
-        let h: u32 = h_s
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()?;
-        if w == 0 || h == 0 {
-            continue;
-        }
-        if best.map_or(true, |(bw, bh)| w.saturating_mul(h) > bw.saturating_mul(bh)) {
-            best = Some((w, h));
-        }
-    }
-    best
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,11 +532,5 @@ mod tests {
         assert_eq!(format_os(Some("windows")), "Windows");
         assert_eq!(format_os(Some("darwin")), "macOS");
         assert_eq!(format_os(None), "");
-    }
-
-    #[test]
-    fn hyprctl_uses_focused_physical_size() {
-        let json = r#"[{"id":0,"name":"HDMI-A-1","width":1920,"height":1080,"focused":false},{"id":1,"name":"eDP-1","width":2880,"height":1920,"focused":true}]"#;
-        assert_eq!(parse_hyprctl_monitors(json), Some((2880, 1920)));
     }
 }

@@ -1,0 +1,70 @@
+import type { HTMLAttributes } from "react";
+import analytics from "../assets/icons/analytics.svg?raw";
+import chartNetwork from "../assets/icons/chart-network.svg?raw";
+import checkCircle from "../assets/icons/check-circle.svg?raw";
+import clock from "../assets/icons/clock.svg?raw";
+import cog from "../assets/icons/cog.svg?raw";
+import expand from "../assets/icons/expand.svg?raw";
+import exclamation from "../assets/icons/exclamation.svg?raw";
+import minus from "../assets/icons/minus.svg?raw";
+import moonSolid from "../assets/icons/moon-solid.svg?raw";
+import pc from "../assets/icons/pc.svg?raw";
+import sparklesSolid from "../assets/icons/sparkles-solid.svg?raw";
+import spinner from "../assets/icons/spinner.svg?raw";
+import sunSolid from "../assets/icons/sun-solid.svg?raw";
+import times from "../assets/icons/times.svg?raw";
+import timesCircle from "../assets/icons/times-circle.svg?raw";
+import wifi from "../assets/icons/wifi.svg?raw";
+
+const ICONS = {
+  "sun-solid": sunSolid,
+  "moon-solid": moonSolid,
+  "sparkles-solid": sparklesSolid,
+  "chart-network": chartNetwork,
+  "check-circle": checkCircle,
+  "times-circle": timesCircle,
+  spinner,
+  minus,
+  expand,
+  times,
+  cog,
+  pc,
+  exclamation,
+  wifi,
+  analytics,
+  clock,
+} as const;
+
+export type PixelIconName = keyof typeof ICONS;
+
+type Props = HTMLAttributes<HTMLSpanElement> & {
+  name: PixelIconName;
+  size?: number;
+};
+
+function coloredSvg(svg: string): string {
+  return svg
+    .replace(/<\?xml[^?]*\?>/, "")
+    .replace(/\s+id="[^"]*"/g, "")
+    .replace(
+      /<svg\b([^>]*)>/,
+      '<svg$1 fill="currentColor" width="100%" height="100%" shape-rendering="crispEdges">',
+    );
+}
+
+export function PixelIcon({
+  name,
+  size = 16,
+  className = "",
+  ...rest
+}: Props) {
+  return (
+    <span
+      aria-hidden
+      className={`inline-block shrink-0 align-middle ${className}`}
+      style={{ width: size, height: size, imageRendering: "pixelated" }}
+      dangerouslySetInnerHTML={{ __html: coloredSvg(ICONS[name]) }}
+      {...rest}
+    />
+  );
+}

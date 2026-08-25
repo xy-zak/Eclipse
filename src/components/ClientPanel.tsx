@@ -1,12 +1,21 @@
-import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
-import { Monitor, Moon, Network, Settings } from "lucide-react";
-import type { LocalNode } from "../types";
+import type { DisplayInfo, LocalNode } from "../types";
+import { Button } from "./Button";
 import { InfoRow, Panel } from "./Panel";
+import { PixelIcon } from "./PixelIcon";
+import { StatusMark } from "./StatusMark";
+
+export type ClientLink = {
+  hostname: string | null;
+  ip: string;
+};
 
 type Props = {
   local: LocalNode | null;
-  resolution: string;
-  streamFps: number;
+  tailscaleOnline: boolean;
+  eclipseOnline: boolean;
+  inbound: ClientLink | null;
+  controlling: ClientLink | null;
+  onForceDisconnect: () => void;
 };
 
 function dash(value: string | number | null | undefined): string {
@@ -16,51 +25,80 @@ function dash(value: string | number | null | undefined): string {
   return String(value);
 }
 
-export function ClientPanel({ local, resolution, streamFps }: Props) {
-  const speed =
-    local?.linkSpeedMbps != null ? `${local.linkSpeedMbps} Mbps` : "—";
+function formatDisplays(displays: DisplayInfo[] | undefined): string {
+  if (!displays?.length) {
+    return "—";
+  }
+  return displays
+    .map((d) =>
+      d.name ? `${d.name} ${d.width}×${d.height}` : `${d.width}×${d.height}`,
+    )
+    .join(", ");
+}
 
+function peerId(link: ClientLink): string {
+  return link.hostname ? `${link.hostname} @ ${link.ip}` : link.ip;
+}
+
+function statusText(
+  inbound: ClientLink | null,
+  controlling: ClientLink | null,
+): string {
+  if (inbound) {
+    return `Currently streaming to Client ${peerId(inbound)}`;
+  }
+  if (controlling) {
+    return `Currently controlling Host ${peerId(controlling)}`;
+  }
+  return "Idle";
+}
+
+export function ClientPanel({
+  local,
+  tailscaleOnline,
+  eclipseOnline,
+  inbound,
+  controlling,
+  onForceDisconnect,
+}: Props) {
   return (
     <Panel
       accent="moonlight"
       title={dash(local?.hostname)}
-      icon={<Moon size={16} strokeWidth={2} />}
-      actions={
-        <Menu>
-          <MenuButton className="inline-flex items-center gap-2 border border-moonlight bg-eclipse px-3 py-1.5 text-sm text-moonlight hover:bg-moonlight hover:text-eclipse">
-            <Settings size={14} strokeWidth={2} />
-            Settings
-          </MenuButton>
-          <MenuItems
-            anchor="bottom end"
-            className="z-20 mt-1 min-w-56 border border-moonlight bg-eclipse p-3 text-sm text-moonlight shadow-none"
-          >
-            <MenuItem disabled>
-              <p className="text-moonlight/70">Moonlight stream</p>
-            </MenuItem>
-            <p className="mt-1 font-medium">1080p · H.264</p>
-            <p className="mt-1 font-medium">{streamFps} fps</p>
-            <p className="mt-3 text-moonlight/70">Shortcuts</p>
-            <p className="mt-1 font-medium">Ctrl+Esc disconnect</p>
-            <p className="mt-1 font-medium">Ctrl+Tab fullscreen</p>
-            <p className="mt-1 font-medium">Ctrl+` minimise</p>
-          </MenuItems>
-        </Menu>
-      }
+      icon={<PixelIcon name="moon-solid" size={16} />}
     >
       <InfoRow label="Operating system" value={dash(local?.os)} />
-      <InfoRow label="IP" value={dash(local?.lanIp)} />
+      <InfoRow label="LAN IP" value={dash(local?.lanIp)} />
       <InfoRow label="Tailscale IP" value={dash(local?.tailscaleIp)} />
-      <InfoRow
-        label="Screen"
-        value={resolution}
-        icon={<Monitor size={14} strokeWidth={2} />}
-      />
-      <InfoRow
-        label="Network speed"
-        value={speed}
-        icon={<Network size={14} strokeWidth={2} />}
-      />
+      <InfoRow label="Displays" value={formatDisplays(local?.displays)} />
+      <div className="mt-4 border-t border-moonlight pt-4">
+        <div className="flex flex-wrap gap-x-6 gap-y-2">
+          <StatusMark
+            ok={tailscaleOnline}
+            label="Tailscale"
+            icon={<PixelIcon name="chart-network" size={14} />}
+          />
+          <StatusMark
+            ok={eclipseOnline}
+            label="Eclipse"
+            icon={<PixelIcon name="sparkles-solid" size={14} />}
+          />
+        </div>
+        <div className="mt-3 flex min-w-0 items-start justify-between gap-4 py-1.5 text-sm">
+          <span className="shrink-0 text-moonlight/70">Status</span>
+          <div className="flex min-w-0 flex-col items-end gap-2">
+            <span className="min-w-0 text-right font-medium wrap-break-word">
+              {statusText(inbound, controlling)}
+            </span>
+            {inbound ? (
+              <Button variant="fail" onClick={onForceDisconnect}>
+                <PixelIcon name="times-circle" size={14} />
+                Force disconnect from streaming client
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
     </Panel>
   );
 }

@@ -1,5 +1,5 @@
-import { Maximize, Minus, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { PixelIcon } from "./PixelIcon";
 
 export function TitleBar() {
   const win = () => getCurrentWindow();
@@ -14,7 +14,7 @@ export function TitleBar() {
           className="flex w-10 items-center justify-center border-l border-moonlight text-moonlight hover:bg-moonlight hover:text-eclipse"
           onClick={() => void win().minimize().catch(() => undefined)}
         >
-          <Minus size={14} strokeWidth={2} />
+          <PixelIcon name="minus" size={14} />
         </button>
         <button
           type="button"
@@ -27,15 +27,15 @@ export function TitleBar() {
             })().catch(() => undefined);
           }}
         >
-          <Maximize size={14} strokeWidth={2} />
+          <PixelIcon name="expand" size={14} />
         </button>
         <button
           type="button"
-          aria-label="Close"
+          aria-label="Hide to tray"
           className="flex w-10 items-center justify-center border-l border-moonlight text-moonlight hover:bg-fail hover:text-eclipse"
           onClick={() => void win().close().catch(() => undefined)}
         >
-          <X size={14} strokeWidth={2} />
+          <PixelIcon name="times" size={14} />
         </button>
       </div>
     </header>

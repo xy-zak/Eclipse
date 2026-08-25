@@ -1,0 +1,20 @@
+polkit.addRule(function (action, subject) {
+  if (!subject.local || !subject.active) {
+    return polkit.Result.NOT_HANDLED;
+  }
+  if (action.id == "org.freedesktop.systemd1.manage-units") {
+    var unit = action.lookup("unit") || action.lookup("name") || "";
+    if (unit == "eclipse-host.service") {
+      var verb = action.lookup("verb") || "";
+      if (verb == "start" || verb == "stop" || verb == "" || verb == "status") {
+        return polkit.Result.YES;
+      }
+    }
+  }
+  if (action.id == "org.freedesktop.policykit.exec") {
+    var prog = action.lookup("program") || "";
+    if (prog == "/usr/lib/eclipse/eclipse-hostctl") {
+      return polkit.Result.YES;
+    }
+  }
+});

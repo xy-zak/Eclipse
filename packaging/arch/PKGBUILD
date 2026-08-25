@@ -1,0 +1,104 @@
+# Binary package of a tree already built by scripts/package.sh.
+# Do not run makepkg from this directory unless sidecars + tauri --no-bundle have been built.
+
+pkgname=eclipse
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Peer-to-peer remote desktop (Sunshine host + Moonlight client)'
+arch=('x86_64')
+url='https://github.com'
+license=('custom:NOASSERTION')
+install=eclipse.install
+options=(!debug)
+depends=(
+  avahi
+  desktop-file-utils
+  ffmpeg
+  gtk3
+  hicolor-icon-theme
+  libayatana-appindicator
+  libcap
+  libdrm
+  libevdev
+  libnotify
+  libpipewire
+  libpulse
+  librsvg
+  libva
+  libx11
+  libxcb
+  libxfixes
+  libxrandr
+  libxtst
+  miniupnpc
+  numactl
+  openssl
+  opus
+  polkit
+  qt6-base
+  qt6-declarative
+  qt6-svg
+  qt6-wayland
+  sdl2-compat
+  sdl2_ttf
+  udev
+  vulkan-icd-loader
+  webkit2gtk-4.1
+)
+optdepends=(
+  'intel-media-driver: Intel VA-API encode/decode'
+  'libva-mesa-driver: AMD VA-API encode/decode'
+  'nvidia-utils: NVIDIA NVENC/NvFBC (driver, not the CUDA toolkit)'
+)
+
+package() {
+  local root
+  root="$(cd "${startdir}/../.." && pwd)"
+  local rel="${root}/src-tauri/target/release"
+
+  if [[ ! -x "${rel}/eclipse" ]]; then
+    echo "Missing ${rel}/eclipse. From the repo root run: ./scripts/package.sh" >&2
+    return 1
+  fi
+  if [[ ! -x "${rel}/sunshine" || ! -x "${rel}/moonlight" ]]; then
+    echo "Missing Sunshine/Moonlight sidecars in ${rel}. Run ./scripts/package.sh" >&2
+    return 1
+  fi
+
+  install -Dm755 "${rel}/eclipse" "${pkgdir}/usr/bin/eclipse"
+  install -Dm755 "${rel}/sunshine" "${pkgdir}/usr/bin/sunshine"
+  install -Dm755 "${rel}/moonlight" "${pkgdir}/usr/bin/moonlight"
+
+  local assets="${root}/src-tauri/resources/sunshine"
+  if [[ ! -f "${assets}/apps.json" ]]; then
+    echo "Missing Sunshine assets at ${assets}" >&2
+    return 1
+  fi
+  install -d "${pkgdir}/usr/lib/Eclipse/share/sunshine"
+  cp -a "${assets}/." "${pkgdir}/usr/lib/Eclipse/share/sunshine/"
+
+  install -Dm644 "${root}/packaging/linux/60-eclipse-sunshine.rules" \
+    "${pkgdir}/usr/lib/udev/rules.d/60-eclipse-sunshine.rules"
+  install -Dm644 "${root}/packaging/linux/eclipse-host.service" \
+    "${pkgdir}/usr/lib/systemd/system/eclipse-host.service"
+  install -Dm644 "${root}/packaging/linux/eclipse-uinput.conf" \
+    "${pkgdir}/usr/lib/modules-load.d/eclipse-uinput.conf"
+  install -Dm755 "${root}/packaging/linux/eclipse-hostctl" \
+    "${pkgdir}/usr/lib/eclipse/eclipse-hostctl"
+  install -Dm644 "${root}/packaging/linux/com.eclipse.hostctl.policy" \
+    "${pkgdir}/usr/share/polkit-1/actions/com.eclipse.hostctl.policy"
+  install -Dm644 "${root}/packaging/linux/10-eclipse-host.rules" \
+    "${pkgdir}/usr/share/polkit-1/rules.d/10-eclipse-host.rules"
+  install -Dm644 "${root}/packaging/linux/eclipse-tray.desktop" \
+    "${pkgdir}/etc/xdg/autostart/eclipse-tray.desktop"
+  install -Dm644 "${root}/packaging/linux/eclipse.desktop" \
+    "${pkgdir}/usr/share/applications/eclipse.desktop"
+
+  local icon="${root}/src-tauri/icons"
+  install -Dm644 "${icon}/32x32.png" "${pkgdir}/usr/share/icons/hicolor/32x32/apps/eclipse.png"
+  install -Dm644 "${icon}/64x64.png" "${pkgdir}/usr/share/icons/hicolor/64x64/apps/eclipse.png"
+  install -Dm644 "${icon}/128x128.png" "${pkgdir}/usr/share/icons/hicolor/128x128/apps/eclipse.png"
+  install -Dm644 "${icon}/128x128@2x.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/eclipse.png"
+  install -Dm644 "${icon}/icon.png" "${pkgdir}/usr/share/icons/hicolor/512x512/apps/eclipse.png"
+  install -Dm644 "${icon}/eclipse.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/eclipse.svg"
+}

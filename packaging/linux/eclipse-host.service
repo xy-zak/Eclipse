@@ -1,0 +1,19 @@
+[Unit]
+Description=Eclipse Sunshine host
+Documentation=https://github.com
+After=network-online.target systemd-logind.service tailscaled.service display-manager.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sunshine
+WorkingDirectory=-/usr/lib/Eclipse
+ConfigurationDirectory=eclipse
+Restart=always
+RestartSec=3
+SupplementaryGroups=input video render
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

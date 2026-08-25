@@ -7,14 +7,14 @@ How to ready a workstation and run Eclipse from this repository. Runtime conditi
 | Piece | State |
 | --- | --- |
 | Tauri 2 + React 19 + Vite + Tailwind v4 | Scaffolded (`com.eclipse.app`) |
-| Sunshine sidecar | Vendored at **v2026.824.30334**, compiled locally, spawned on app start |
+| Sunshine sidecar | Vendored at **v2026.824.30334**, compiled locally. Packages run it as a boot-time service; `tauri dev` spawns a child |
 | Moonlight-Qt sidecar | Vendored at commit **`d2f6990b`**, compiled locally, spawned on Connect |
-| Dashboard | Sidecar pills, Tailscale **Peers** list, per-row **Connect** |
+| Dashboard | Sidecar pills, Tailscale **Peers** list, per-row **Connect**, inbound stream on **CLIENT**, tray Host streaming toggle |
 | Tailscale discovery | `tailscale status --json` + TCP `:47990` probe (`discovery.rs`) |
 | Pairing / stream launch | `pairing.rs` POST `/api/pin`; `session.rs` `list` / `pair --pin` / `stream … Desktop` |
-| GitHub Actions installers | Not implemented |
+| GitHub Actions installers | Not implemented (local `scripts/package.sh` / `package.ps1` first) |
 
-Closing the Eclipse window kills the Sunshine child process. The UI still opens if Sunshine is missing or fails to start.
+From source, **Quit Eclipse** in the tray kills the Sunshine child. Closing the window only hides it. Packaged installs leave `eclipse-host.service` / `SunshineService` as last toggled; reboot starts the host again. The UI still opens if Sunshine is missing or fails to start. `eclipse --tray` starts hidden.
 
 ---
 
@@ -86,7 +86,7 @@ If this machine will host a stream or inject input:
 
 That setcaps every Sunshine binary it finds (Tauri copies strip capabilities), installs udev rules into `/etc`, and adds the user to `input`. Re-run after sidecar rebuilds and after the first `tauri dev` copy. Details: [Video.md](Video.md).
 
-The sidecar CMake install still writes udev/systemd units into `src-tauri/resources/sunshine-prefix/` as well; that prefix is not loaded by the system.
+The sidecar CMake install still writes udev/systemd units into `src-tauri/resources/sunshine-prefix/` as well; that prefix is not loaded by the system. Packaged Linux installs Eclipse's own `eclipse-host.service` instead. `linux-host-perms.sh` does not enable that unit (source trees keep the GUI child).
 
 ---
 
@@ -165,14 +165,35 @@ npx tsc --noEmit
 cd src-tauri && cargo check
 ```
 
-Release packaging (`npm run tauri -- build`) is not wired to a CI matrix yet. It still requires the sidecar files to be present for this host triple.
+Release packaging is local, not a CI matrix. From the repo root on the **same OS** you want to install:
+
+```bash
+./scripts/package.sh                 # Arch, Debian/Ubuntu 24.04, or Fedora
+# --skip-sidecars if binaries/sunshine-<triple> is already built
+```
+
+```powershell
+.\scripts\package.ps1
+```
+
+| OS | Output |
+| --- | --- |
+| Arch (this machine) | `packaging/arch/eclipse-*.pkg.tar.zst` — `sudo pacman -U` that file |
+| Debian / Ubuntu 24.04 | `src-tauri/target/release/bundle/deb/*.deb` |
+| Fedora | `src-tauri/target/release/bundle/rpm/*.rpm` |
+| Windows 11 | `src-tauri/target/release/bundle/nsis/*-setup.exe` |
+
+Do not build a Fedora RPM on Arch (or a Debian package on Fedora): sidecar linkage follows the build distro. CUDA toolkit is used only if `nvcc` is present while compiling Linux Sunshine; it is **not** a runtime dependency. NVIDIA users need the vendor driver.
+
+Linux packages install udev rules, `setcap` the Sunshine sidecar, and add logged-in users to `input`. Log out once after install. Source trees still use [`scripts/linux-host-perms.sh`](../scripts/linux-host-perms.sh).
 
 ### Layout
 
 ```
 Eclipse/
   docs/                         # this guide, user guide, architecture spec
-  scripts/                      # bootstrap, setup, sidecar build (sh / ps1)
+  packaging/                    # deb/rpm maintainer scripts, Arch PKGBUILD, NSIS hooks
+  scripts/                      # bootstrap, setup, sidecar build, package.sh / package.ps1
   src/                          # React + Vite + Tailwind
   src-tauri/
     binaries/                   # gitignored sidecars
@@ -183,16 +204,16 @@ Eclipse/
       lib.rs                    # Tauri setup; sidecar_status, list_peers, connect
       sidecar.rs                # Engine adapter (resolve / spawn / health / --creds)
       discovery.rs              # Tailscale peers + Sunshine TCP probe
-      pairing.rs                # POST /api/pin; host log/RTSP preflight
-      session.rs                # Moonlight list / pair / stream
-      session.rs                # Moonlight list / pair / stream
+      pairing.rs                # POST /api/pin; GET /api/displays; GET /api/sessions; host log/RTSP preflight
+      display.rs                # local monitors + integer-scale table
+      session.rs                # Moonlight list / pair / stream windows
     tauri.conf.json
   vendor/PINS                    # required submodule SHAs
   vendor/sunshine/              # submodule
   vendor/moonlight-qt/          # submodule
 ```
 
-Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream --1080 --video-codec H.264 … Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. On Windows, Connect also copies `resources/moonlight-runtime` beside `moonlight.exe` so Qt/SDL/FFmpeg DLLs load. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
+Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `inbound_status` → `{ ip }` when this PC is being streamed to; `force_disconnect_inbound` → POST `/api/apps/close` on localhost; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream --resolution WxH --video-codec H.264 … Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. On Windows, Connect also copies `resources/moonlight-runtime` beside `moonlight.exe` so Qt/SDL/FFmpeg DLLs load. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
 
 Adapter unit tests: `cd src-tauri && cargo test --lib`
 
@@ -224,12 +245,12 @@ Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes:
 | Sunshine CMake `Could NOT find OpenSSL` on Windows | Sunshine must be configured with MSYS2 UCRT64, not MSVC. Re-run `.\scripts\setup-windows.ps1` so bootstrap installs MSYS2 + `mingw-w64-ucrt-x86_64-openssl`. Delete `build\sunshine` if it was configured with MSVC. |
 | Sunshine configure stops at `Got from CI ... version` | CMake prints that on stderr. PowerShell `Stop` was treating it as a fatal error. Re-run `.\scripts\setup-windows.ps1`. |
 | `MISSING nmake (VsDevCmd)` after VS is installed | `windows-dev-env.ps1` must not reset PATH after importing VsDevCmd. Open a new PowerShell and re-run `.\scripts\setup-windows.ps1`. |
-| Port 47990 in use | Another Eclipse/Sunshine still running. Close the previous window. |
+| Port 47990 in use | Another Eclipse/Sunshine still running, or the host service is up. Quit Eclipse (source child) or toggle Host streaming off / stop `eclipse-host.service`. |
 | Windows `https://localhost:47990` empty / `netstat` has no 47990 | Sunshine exited on first start because `share/sunshine/apps.json` was missing beside the exe. Restart Eclipse after a sidecar rebuild so `sidecar.rs` stages that layout. |
 | Windows Connect: PIN timeout / Moonlight never appears | `moonlight.exe` needs Qt/SDL/FFmpeg DLLs next to it. Re-run `.\scripts\build-sidecars.ps1` so `windeployqt` fills `src-tauri/resources/moonlight-runtime/`. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
 | Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
-| Connect hangs then errors on PIN | Host Eclipse/Sunshine must be running; Moonlight pair must reach GameStream ports over Tailscale. |
+| Connect hangs then errors on PIN | Host Sunshine must be running (package service or source child); Moonlight pair must reach GameStream ports over Tailscale. |
 | Windows Connect PIN timeout while Linux→Windows works | Moonlight never started (missing Qt/SDL DLLs). Re-run `.\scripts\build-sidecars.ps1` and restart Eclipse. |
 | Moonlight “No video received” / UDP 47998 | See [Video.md](Video.md). Check host Sunshine for `Couldn't bind RTSP server to port [48010]`, `Couldn't import RGB Image: 00003009`, or capture init failure. |
 | Moonlight 503 / KMS `CAP_SYS_ADMIN` | `capture = kms` without setcap. `./scripts/linux-host-perms.sh` or `--reset-capture`. |
@@ -238,6 +259,5 @@ Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes:
 
 ## Next product work (not done)
 
-- Installer matrix and Linux package `postinst` (`input` group / udev / setcap). Source builds use `scripts/linux-host-perms.sh`.
-- Windows: Sunshine as a service + `requireAdministrator` (see architecture spec)
+- GitHub Actions installer matrix and GitHub Releases (after local packages are confirmed)
 - Optional prompt when the host uses a custom Sunshine password

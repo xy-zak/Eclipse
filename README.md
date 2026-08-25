@@ -2,11 +2,11 @@
 
 Peer-to-peer remote desktop. Every install is a **symmetric node**: Tauri + React is the control plane; **Sunshine** (host) and **Moonlight-Qt** (client) are bundled data-plane sidecars. Discovery uses the OS Tailscale CLI, not a central relay.
 
-**Status:** the app launches, starts a local Sunshine sidecar, lists other tailnet nodes (TCP probe to Sunshine `:47990`), and **Connect** pairs then opens Moonlight on Desktop. Native installers are not implemented yet.
+**Status:** Packaged installs run Sunshine as a boot-time host service and an Eclipse tray after login (Host streaming on/off). **Connect** pairs then opens Moonlight on Desktop. Local native packages can be built with `./scripts/package.sh` (Linux) or `.\scripts\package.ps1` (Windows). GitHub Actions installers are not wired yet.
 
 | | Prepare the system | Install and run |
 | --- | --- | --- |
-| **Users** | GPU hardware encode/decode, Linux `input` group for injection, Tailscale when peers exist | No packages yet — build from source (same commands as developers) |
+| **Users** | GPU hardware encode/decode, Linux `input` group for injection, Tailscale when peers exist | Build a package on that OS (`package.sh` / `package.ps1`) and install it, or run from source |
 | **Developers** | Tauri, Rust, Node, Qt 6, CMake/Ninja, GPU drivers | Clone with submodules → `./scripts/setup-linux.sh` (or `.\scripts\setup-windows.ps1`) → `npm run tauri -- dev` |
 
 - **[docs/User_Guide.md](docs/User_Guide.md)** — runtime requirements and how to run the app
@@ -31,6 +31,16 @@ cd Eclipse
 npm run tauri -- dev
 ```
 
-`setup` installs the toolchain (including CUDA toolkit when an NVIDIA GPU is present), builds sidecars, and runs `npm install`. First run can take a while (VS Build Tools, Qt, and CUDA are large). Set `ECLIPSE_CUDA=off` to skip CUDA. Bootstrap does **not** install NVIDIA kernel / Game Ready drivers.
+`setup` installs the toolchain (including CUDA toolkit when an NVIDIA GPU is present), builds sidecars, and runs `npm install`. First run can take a while (VS Build Tools, Qt, and CUDA are large). Set `ECLIPSE_CUDA=off` to skip CUDA. Bootstrap does **not** install NVIDIA kernel / Game Ready drivers. The CUDA toolkit is a compile-time tool for Linux Sunshine kernels; it is never bundled in the app package.
+
+To produce an installer on this machine (must match the target OS):
+
+```bash
+./scripts/package.sh          # Arch → .pkg.tar.zst, Debian → .deb, Fedora → .rpm
+```
+
+```powershell
+.\scripts\package.ps1         # Windows 11 → NSIS setup.exe
+```
 
 Moonlight is pinned to commit `d2f6990b`, not tag `v6.1.0` (that tag does not build against FFmpeg 8). Details in the development guide.

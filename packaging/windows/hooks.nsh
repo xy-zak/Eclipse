@@ -1,0 +1,53 @@
+; Eclipse NSIS hooks. Firewall + SunshineService (boot-time host).
+; The running Eclipse GUI does not require Administrator.
+
+!macro NSIS_HOOK_PREINSTALL
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream TCP (in)"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream TCP (in)" dir=in action=allow protocol=TCP localport=47984-47990,48010 profile=any'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream UDP (in)"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream UDP (in)" dir=in action=allow protocol=UDP localport=47998-48010 profile=any'
+  Pop $0
+
+  ; Recreate so upgrades pick up a new sunshinesvc.exe. SCM name must stay
+  ; SunshineService to match vendor/sunshine/tools/sunshinesvc.cpp.
+  nsExec::ExecToLog 'net stop SunshineService'
+  Pop $0
+  nsExec::ExecToLog 'sc delete SunshineService'
+  Pop $0
+  StrCpy $0 '"$INSTDIR\tools\sunshinesvc.exe"'
+  nsExec::ExecToLog 'sc create SunshineService binPath= $0 start= delayed-auto DisplayName= "Eclipse Host"'
+  Pop $0
+  nsExec::ExecToLog 'sc description SunshineService "Eclipse Sunshine host. Do not install official Sunshine alongside Eclipse."'
+  Pop $0
+  nsExec::ExecToLog 'sc failure SunshineService reset= 86400 actions= restart/5000/restart/5000/restart/5000'
+  Pop $0
+  SetOutPath "$INSTDIR"
+  nsExec::ExecToLog '"$INSTDIR\sunshine.exe" --creds eclipse eclipse'
+  Pop $0
+  nsExec::ExecToLog 'net start SunshineService'
+  Pop $0
+  nsExec::ExecToLog '"$INSTDIR\grant-host-acl.cmd"'
+  Pop $0
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Eclipse" '"$INSTDIR\eclipse.exe" --tray'
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  nsExec::ExecToLog 'net stop SunshineService'
+  Pop $0
+  nsExec::ExecToLog 'sc delete SunshineService'
+  Pop $0
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Eclipse"
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream TCP (in)"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream UDP (in)"'
+  Pop $0
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+!macroend

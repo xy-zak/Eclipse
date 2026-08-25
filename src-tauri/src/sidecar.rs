@@ -1,5 +1,7 @@
 //! Data-plane sidecars. Sunshine and Moonlight are opaque binaries; this module
 //! is the only place that knows their names, asset env, and health port.
+//! Packaged installs attach to a boot-time Sunshine service; `tauri dev` still
+//! spawns a child and kills only that child on exit.
 
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -78,6 +80,19 @@ pub const MOONLIGHT: Engine = Engine {
 pub const SUNSHINE_UI_USER: &str = "eclipse";
 pub const SUNSHINE_UI_PASS: &str = "eclipse";
 
+/// Packaged Linux host service config (`ConfigurationDirectory=eclipse`).
+const LINUX_SYSTEM_SUNSHINE_DIR: &str = "/etc/eclipse/sunshine";
+
+/// Windows SCM name hardcoded in `vendor/sunshine/tools/sunshinesvc.cpp`.
+#[cfg(windows)]
+const WINDOWS_HOST_SERVICE: &str = "SunshineService";
+
+/// systemd unit installed by Linux packages.
+#[cfg(not(windows))]
+const LINUX_HOST_SERVICE: &str = "eclipse-host.service";
+
+const HOST_HEALTH_TIMEOUT: Duration = Duration::from_millis(400);
+
 /// Sunshine `credentials_file` default (`file_state`): `sunshine_state.json` under appdata.
 pub fn sunshine_state_path() -> PathBuf {
     #[cfg(windows)]
@@ -91,12 +106,26 @@ pub fn sunshine_state_path() -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_else(|| PathBuf::from(".config"));
-        base.join("sunshine").join("sunshine_state.json")
+        linux_sunshine_state_path(
+            Path::new(LINUX_SYSTEM_SUNSHINE_DIR),
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            std::env::var_os("HOME").map(PathBuf::from),
+        )
     }
+}
+
+fn linux_sunshine_state_path(
+    system_dir: &Path,
+    xdg_config: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if system_dir.is_dir() {
+        return system_dir.join("sunshine_state.json");
+    }
+    let base = xdg_config
+        .or_else(|| home.map(|h| h.join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("sunshine").join("sunshine_state.json")
 }
 
 pub fn sunshine_creds_present(path: &Path) -> bool {
@@ -135,11 +164,14 @@ fn ensure_ui_credentials() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             eprintln!(
                 "Eclipse: sunshine --creds exited {} ({})",
-                out.status, stderr.trim()
+                out.status,
+                stderr.trim()
             );
         }
         Err(err) => {
-            eprintln!("Eclipse: sunshine --creds failed ({err}); Web UI welcome may still be required.");
+            eprintln!(
+                "Eclipse: sunshine --creds failed ({err}); Web UI welcome may still be required."
+            );
         }
     }
 }
@@ -164,8 +196,10 @@ impl Engine {
     }
 
     pub fn assets_dir(self) -> Option<PathBuf> {
-        self.assets_rel
-            .map(|rel| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel))
+        self.assets_rel?;
+        sunshine_asset_candidates(current_exe_dir().as_deref())
+            .into_iter()
+            .find(|p| p.join("apps.json").is_file())
     }
 
     /// Dev builds copy `externalBin` next to the exe without a triple suffix.
@@ -213,34 +247,39 @@ impl Engine {
         })?;
         let mut cmd = Command::new(&bin);
         if let Some(parent) = bin.parent() {
-            if let Some(dir) = self.assets_dir().filter(|d| d.is_dir()) {
-                match stage_sunshine_share(parent, &dir) {
-                    Ok(staged) => {
-                        if let Some(var) = self.asset_env {
-                            cmd.env(var, &staged);
-                        }
+            let mut cwd = parent.to_path_buf();
+            if self.assets_rel.is_some() {
+                if let Some((run_cwd, staged)) = prepare_sunshine_share(parent) {
+                    if let Some(var) = self.asset_env {
+                        cmd.env(var, &staged);
                     }
-                    Err(err) => {
-                        eprintln!("Eclipse: could not stage Sunshine assets ({err})");
-                    }
+                    cwd = run_cwd;
+                } else {
+                    eprintln!("Eclipse: Sunshine assets not found; host UI may fail");
                 }
             }
             if cfg!(windows) && self.name == MOONLIGHT.name {
-                let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MOONLIGHT_RUNTIME_REL);
-                if runtime.is_dir() {
-                    if let Err(err) = stage_moonlight_runtime(parent, &runtime) {
-                        eprintln!("Eclipse: could not stage Moonlight runtime ({err})");
-                    }
-                }
+                prepare_moonlight_runtime(parent, &mut cmd);
             }
-            cmd.current_dir(parent);
+            cmd.current_dir(cwd);
         }
         Ok(cmd)
     }
 
     pub(crate) fn spawn_args(self, args: &[String]) -> Result<Child, std::io::Error> {
+        self.spawn_args_env(args, &[])
+    }
+
+    pub(crate) fn spawn_args_env(
+        self,
+        args: &[String],
+        env: &[(&str, String)],
+    ) -> Result<Child, std::io::Error> {
         let mut cmd = self.command()?;
         cmd.args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         cmd.spawn()
     }
 
@@ -275,6 +314,125 @@ fn paths_same(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+fn current_exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+fn linux_runtime_data_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("eclipse");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".local/share/eclipse");
+    }
+    std::env::temp_dir().join("eclipse")
+}
+
+/// Locations that may hold Sunshine `apps.json` in dev and packaged installs.
+fn sunshine_asset_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = exe_dir {
+        out.push(dir.join(SUNSHINE_SHARE_REL));
+        out.push(dir.join("resources").join("sunshine"));
+        out.push(dir.join("share").join("sunshine"));
+        if let Some(parent) = dir.parent() {
+            out.push(parent.join("lib").join("Eclipse").join(SUNSHINE_SHARE_REL));
+            out.push(
+                parent
+                    .join("lib")
+                    .join("Eclipse")
+                    .join("resources")
+                    .join("sunshine"),
+            );
+        }
+    }
+    out.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("sunshine"),
+    );
+    out
+}
+
+fn prepare_sunshine_share(bin_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dest = bin_dir.join(SUNSHINE_SHARE_REL);
+    if dest.join("apps.json").is_file() {
+        return Some((bin_dir.to_path_buf(), dest));
+    }
+    if let Some(parent) = bin_dir.parent() {
+        let lib = parent.join("lib").join("Eclipse");
+        let share = lib.join(SUNSHINE_SHARE_REL);
+        if share.join("apps.json").is_file() {
+            return Some((lib, share));
+        }
+    }
+    let assets = sunshine_asset_candidates(Some(bin_dir))
+        .into_iter()
+        .find(|p| p.join("apps.json").is_file())?;
+    match stage_sunshine_share(bin_dir, &assets) {
+        Ok(staged) => Some((bin_dir.to_path_buf(), staged)),
+        Err(err) => {
+            if cfg!(windows) {
+                eprintln!("Eclipse: could not stage Sunshine assets ({err})");
+                return None;
+            }
+            let data = linux_runtime_data_dir();
+            match stage_sunshine_share(&data, &assets) {
+                Ok(staged) => Some((data, staged)),
+                Err(err) => {
+                    eprintln!("Eclipse: could not stage Sunshine assets ({err})");
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn moonlight_runtime_candidates(bin_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        bin_dir.to_path_buf(),
+        bin_dir.join("moonlight-runtime"),
+        bin_dir.join("resources").join("moonlight-runtime"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MOONLIGHT_RUNTIME_REL),
+    ]
+}
+
+fn prepend_env_path(cmd: &mut Command, dir: &Path) {
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("PATH", joined);
+    }
+}
+
+fn prepare_moonlight_runtime(bin_dir: &Path, cmd: &mut Command) {
+    if moonlight_runtime_ready(bin_dir) {
+        return;
+    }
+    for runtime in moonlight_runtime_candidates(bin_dir) {
+        if !runtime.is_dir() {
+            continue;
+        }
+        if paths_same(&runtime, bin_dir) {
+            if moonlight_runtime_ready(bin_dir) {
+                return;
+            }
+            continue;
+        }
+        if stage_moonlight_runtime(bin_dir, &runtime).is_ok() && moonlight_runtime_ready(bin_dir) {
+            return;
+        }
+        if runtime.join("Qt6Core.dll").is_file() {
+            prepend_env_path(cmd, &runtime);
+            return;
+        }
     }
 }
 
@@ -344,6 +502,26 @@ impl HostProcess {
             return;
         }
         *slot = None;
+        if host_service_installed() {
+            if sunshine_already_hosted() {
+                eprintln!(
+                    "Eclipse: Sunshine already running (health {}); attaching, not spawning.",
+                    SUNSHINE.health().map(Health::url).unwrap_or_default()
+                );
+            } else {
+                eprintln!(
+                    "Eclipse: host service is installed but stopped; not spawning a competing child."
+                );
+            }
+            return;
+        }
+        if sunshine_already_hosted() {
+            eprintln!(
+                "Eclipse: Sunshine already running (health {}); attaching, not spawning.",
+                SUNSHINE.health().map(Health::url).unwrap_or_default()
+            );
+            return;
+        }
         ensure_ui_credentials();
         match SUNSHINE.spawn() {
             Ok(child) => {
@@ -357,6 +535,43 @@ impl HostProcess {
                 eprintln!("Eclipse: Sunshine sidecar failed to start ({err}); UI will still open.");
             }
         }
+    }
+
+    /// Tray/package control: start or stop the OS host service when installed,
+    /// otherwise the GUI-owned Sunshine child (source/`tauri dev`).
+    pub fn set_host_running(&self, on: bool) -> Result<(), String> {
+        if host_service_installed() {
+            if on {
+                self.stop_sunshine();
+                start_host_service()?;
+                if wait_for(
+                    || SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT),
+                    Duration::from_secs(8),
+                ) {
+                    return Ok(());
+                }
+                return Err(
+                    "host service started but Sunshine is not listening on 127.0.0.1:47990".into(),
+                );
+            }
+            stop_host_service()?;
+            self.stop_sunshine();
+            return Ok(());
+        }
+        if on {
+            self.start_sunshine();
+            if self.sunshine_running()
+                || wait_for(
+                    || SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT),
+                    Duration::from_secs(8),
+                )
+            {
+                return Ok(());
+            }
+            return Err("Sunshine sidecar did not start".into());
+        }
+        self.stop_sunshine();
+        Ok(())
     }
 
     pub fn stop_sunshine(&self) {
@@ -373,7 +588,130 @@ impl HostProcess {
         if !alive {
             *slot = None;
         }
-        alive
+        alive || SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT)
+    }
+}
+
+fn wait_for(pred: impl Fn() -> bool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if pred() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return pred();
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn sunshine_already_hosted() -> bool {
+    SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT) || host_service_active()
+}
+
+pub fn host_service_installed() -> bool {
+    #[cfg(windows)]
+    {
+        Command::new("sc")
+            .args(["query", WINDOWS_HOST_SERVICE])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        linux_host_unit_installed(&[
+            Path::new("/usr/lib/systemd/system/eclipse-host.service"),
+            Path::new("/etc/systemd/system/eclipse-host.service"),
+        ])
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn linux_host_unit_installed(candidates: &[&Path]) -> bool {
+    candidates.iter().any(|p| p.is_file())
+}
+
+#[cfg(not(windows))]
+const LINUX_HOSTCTL: &str = "/usr/lib/eclipse/eclipse-hostctl";
+
+fn start_host_service() -> Result<(), String> {
+    control_host_service("start")
+}
+
+fn stop_host_service() -> Result<(), String> {
+    control_host_service("stop")
+}
+
+fn control_host_service(action: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let status = Command::new("net")
+            .args([action, WINDOWS_HOST_SERVICE])
+            .status()
+            .map_err(|err| format!("net {action} {WINDOWS_HOST_SERVICE}: {err}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        // `net start` when already running / `net stop` when already stopped.
+        if action == "start" && host_service_active() {
+            return Ok(());
+        }
+        if action == "stop" && !host_service_active() {
+            return Ok(());
+        }
+        Err(format!(
+            "net {action} {WINDOWS_HOST_SERVICE} failed (is the service ACL missing?)"
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let status = Command::new("systemctl")
+            .args(["--no-ask-password", action, LINUX_HOST_SERVICE])
+            .status()
+            .map_err(|err| format!("systemctl {action}: {err}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        if Path::new(LINUX_HOSTCTL).is_file() {
+            let status = Command::new("pkexec")
+                .args([LINUX_HOSTCTL, action])
+                .status()
+                .map_err(|err| format!("pkexec eclipse-hostctl {action}: {err}"))?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        if action == "start" && host_service_active() {
+            return Ok(());
+        }
+        if action == "stop" && !host_service_active() {
+            return Ok(());
+        }
+        Err(format!(
+            "could not {action} {LINUX_HOST_SERVICE} (install polkit helper or run as root)"
+        ))
+    }
+}
+
+fn host_service_active() -> bool {
+    #[cfg(windows)]
+    {
+        let Ok(out) = Command::new("sc")
+            .args(["query", WINDOWS_HOST_SERVICE])
+            .output()
+        else {
+            return false;
+        };
+        String::from_utf8_lossy(&out.stdout).contains("RUNNING")
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("systemctl")
+            .args(["is-active", "--quiet", LINUX_HOST_SERVICE])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -464,6 +802,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn linux_sunshine_state_path_prefers_system_dir_when_present() {
+        let root = unique_temp("eclipse-sys-sunshine");
+        let system = root.join("eclipse").join("sunshine");
+        std::fs::create_dir_all(&system).unwrap();
+        let path =
+            linux_sunshine_state_path(&system, Some(root.join("xdg")), Some(root.join("home")));
+        assert_eq!(path, system.join("sunshine_state.json"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn linux_sunshine_state_path_uses_xdg_when_system_dir_missing() {
+        let root = unique_temp("eclipse-xdg-sunshine");
+        let missing = root.join("missing-system");
+        let path =
+            linux_sunshine_state_path(&missing, Some(root.join("xdg")), Some(root.join("home")));
+        assert_eq!(
+            path,
+            root.join("xdg")
+                .join("sunshine")
+                .join("sunshine_state.json")
+        );
+        assert_eq!(LINUX_SYSTEM_SUNSHINE_DIR, "/etc/eclipse/sunshine");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn linux_host_unit_installed_checks_candidate_paths() {
+        let root = unique_temp("eclipse-unit");
+        std::fs::create_dir_all(&root).unwrap();
+        let unit = root.join("eclipse-host.service");
+        assert!(!linux_host_unit_installed(&[&unit]));
+        std::fs::write(&unit, "[Unit]\n").unwrap();
+        assert!(linux_host_unit_installed(&[&unit]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stop_sunshine_is_a_no_op_without_a_child() {
+        let host = HostProcess::new();
+        host.stop_sunshine();
+        // No child and (usually) nothing on :47990 in unit tests.
+        let _ = host.sunshine_running();
+    }
+
+    #[test]
+    fn sunshine_running_follows_health_probe_without_a_child() {
+        let _listener = std::net::TcpListener::bind("127.0.0.1:47990");
+        let host = HostProcess::new();
+        if SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT) {
+            assert!(host.sunshine_running());
+        }
+        host.stop_sunshine();
+        if SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT) {
+            assert!(
+                host.sunshine_running(),
+                "stop_sunshine must not take down a host we did not spawn"
+            );
+        }
+    }
+
     fn unique_temp(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "{prefix}-{}-{}",
@@ -476,6 +876,33 @@ mod tests {
     }
 
     #[test]
+    fn sunshine_asset_candidates_include_packaged_lib_dir() {
+        let bin = PathBuf::from("/usr/bin");
+        let c = sunshine_asset_candidates(Some(&bin));
+        assert!(c.contains(&PathBuf::from("/usr/lib/Eclipse/share/sunshine")));
+        assert!(c.contains(&PathBuf::from("/usr/bin/share/sunshine")));
+    }
+
+    #[test]
+    fn prepare_sunshine_share_uses_usr_lib_eclipse_without_copy() {
+        let root = unique_temp("eclipse-pkg-layout");
+        let usr = root.join("usr");
+        let bin_dir = usr.join("bin");
+        let share = usr
+            .join("lib")
+            .join("Eclipse")
+            .join("share")
+            .join("sunshine");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::write(share.join("apps.json"), r#"{"apps":[]}"#).unwrap();
+        let (cwd, staged) = prepare_sunshine_share(&bin_dir).expect("packaged assets");
+        assert_eq!(cwd, usr.join("lib").join("Eclipse"));
+        assert_eq!(staged, share);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn copy_dir_all_copies_nested_files() {
         let root = unique_temp("eclipse-copy");
         let src = root.join("src");
@@ -484,7 +911,10 @@ mod tests {
         std::fs::write(src.join("apps.json"), "{}").unwrap();
         std::fs::write(src.join("web").join("index.html"), "<html>").unwrap();
         copy_dir_all(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("apps.json")).unwrap(), "{}");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("apps.json")).unwrap(),
+            "{}"
+        );
         assert_eq!(
             std::fs::read_to_string(dst.join("web").join("index.html")).unwrap(),
             "<html>"
@@ -526,7 +956,10 @@ mod tests {
         std::fs::write(dest.join("apps.json"), "keep").unwrap();
         let staged = stage_sunshine_share(root.as_path(), &dest).unwrap();
         assert_eq!(staged, dest);
-        assert_eq!(std::fs::read_to_string(dest.join("apps.json")).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("apps.json")).unwrap(),
+            "keep"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

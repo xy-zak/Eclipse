@@ -1,5 +1,13 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Remboy";
+  src: url("../assets/fonts/Remboy-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 @theme {
   --color-eclipse: #0f0f29;
   --color-moonlight: #d9d9fc;
@@ -7,8 +15,9 @@
   --color-success: #3ecf8e;
   --color-fail: #f05252;
   --font-sans: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-body: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  --font-title: "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --font-title: "Remboy", ui-serif, Georgia, serif;
   --radius-xs: 0px;
   --radius-sm: 0px;
   --radius-md: 0px;
@@ -20,15 +29,59 @@
   --radius-DEFAULT: 0px;
 }
 
+@keyframes eclipse-host-flash {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.eclipse-host-flash {
+  animation: eclipse-host-flash 1s ease-out forwards;
+}
+
 html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
 body {
   margin: 0;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
   background: #0f0f29;
   color: #d9d9fc;
+  color-scheme: dark;
+}
+
+/* Square moonlight scrollbars; skip scrollbar-width so WebKit uses these rules. */
+* {
+  scrollbar-color: #d9d9fc #0f0f29;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #0f0f29;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #d9d9fc;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #f7c708;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  height: 0;
+  width: 0;
 }

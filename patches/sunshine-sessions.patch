@@ -1,0 +1,173 @@
+diff --git i/src/confighttp.cpp w/src/confighttp.cpp
+index b4de403c..67fb2315 100644
+--- i/src/confighttp.cpp
++++ w/src/confighttp.cpp
+@@ -1159,6 +1159,7 @@ namespace confighttp {
+ 
+     print_req(request);
+ 
++    rtsp_stream::terminate_sessions();
+     proc::proc.terminate();
+ 
+     nlohmann::json output_tree;
+@@ -1651,6 +1652,30 @@ namespace confighttp {
+     output_tree["displays"] = std::move(displays);
+     send_response(response, output_tree);
+   }
++
++  /**
++   * @brief List active inbound streaming sessions and their client addresses.
++   *
++   * @api_examples{/api/sessions| GET| null}
++   */
++  void getSessions(const resp_https_t &response, const req_https_t &request) {
++    if (!authenticate(response, request)) {
++      return;
++    }
++
++    print_req(request);
++
++    nlohmann::json output_tree;
++    output_tree["status"] = true;
++    nlohmann::json sessions = nlohmann::json::array();
++    for (const auto &ip : rtsp_stream::session_addresses()) {
++      nlohmann::json item;
++      item["ip"] = ip;
++      sessions.push_back(std::move(item));
++    }
++    output_tree["sessions"] = std::move(sessions);
++    send_response(response, output_tree);
++  }
+ 
+   /**
+    * @brief Update existing credentials.
+@@ -2248,6 +2273,7 @@ namespace confighttp {
+     server.resource["^/api/pin$"]["POST"] = savePin;
+     server.resource["^/api/logs$"]["GET"] = getLogs;
+     server.resource["^/api/displays$"]["GET"] = getDisplays;
++    server.resource["^/api/sessions$"]["GET"] = getSessions;
+     server.resource["^/api/reset-display-device-persistence$"]["POST"] = resetDisplayDevicePersistence;
+     server.resource["^/api/restart$"]["POST"] = restart;
+     server.resource["^/api/virtual-input/license$"]["GET"] = getVirtualInputLicense;
+diff --git i/src/rtsp.cpp w/src/rtsp.cpp
+index 5e5ba6cf..95c5173c 100644
+--- i/src/rtsp.cpp
++++ w/src/rtsp.cpp
+@@ -639,6 +639,28 @@ namespace rtsp_stream {
+       return (int) _session_slots->size();
+     }
+ 
++    /**
++     * @brief Client addresses of active streaming sessions.
++     * @return Deduplicated client IP addresses.
++     */
++    std::vector<std::string> session_addresses() {
++      auto lg = _session_slots.lock();
++      std::set<std::string> uniq;
++      std::vector<std::string> out;
++      for (auto &slot : *_session_slots) {
++        auto state = stream::session::state(*slot);
++        if (state != stream::session::state_e::RUNNING && state != stream::session::state_e::STARTING) {
++          continue;
++        }
++        auto ip = stream::session::peer_address(*slot);
++        if (ip.empty() || !uniq.insert(ip).second) {
++          continue;
++        }
++        out.push_back(std::move(ip));
++      }
++      return out;
++    }
++
+     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;  ///< Launch event.
+ 
+     /**
+@@ -756,6 +778,11 @@ namespace rtsp_stream {
+     return server.session_count();
+   }
+ 
++  std::vector<std::string> session_addresses() {
++    server.clear(false);
++    return server.session_addresses();
++  }
++
+   void terminate_sessions() {
+     server.clear(true);
+     input::terminate_gamepads();
+diff --git i/src/rtsp.h w/src/rtsp.h
+index 2a937805..a8ea5544 100644
+--- i/src/rtsp.h
++++ w/src/rtsp.h
+@@ -6,6 +6,8 @@
+ 
+ // standard includes
+ #include <atomic>
++#include <string>
++#include <vector>
+ 
+ // local includes
+ #include "crypto.h"
+@@ -64,6 +66,12 @@ namespace rtsp_stream {
+    */
+   int session_count();
+ 
++  /**
++   * @brief Client addresses of active streaming sessions.
++   * @return Deduplicated client IP addresses.
++   */
++  std::vector<std::string> session_addresses();
++
+   /**
+    * @brief Terminates all running streaming sessions.
+    */
+diff --git i/src/stream.cpp w/src/stream.cpp
+index 5d31a555..871cb1db 100644
+--- i/src/stream.cpp
++++ w/src/stream.cpp
+@@ -2140,6 +2140,29 @@ namespace stream {
+       return session.client_cert;
+     }
+ 
++    /**
++     * @brief Return the client address for this session.
++     */
++    std::string peer_address(session_t &session) {
++      std::string raw;
++      if (session.control.peer) {
++        raw = platf::from_sockaddr((sockaddr *) &session.control.peer->address.address);
++      } else if (!session.control.expected_peer_address.empty()) {
++        raw = session.control.expected_peer_address;
++      } else {
++        try {
++          return net::addr_to_normalized_string(session.video.peer.address());
++        } catch (...) {
++          return {};
++        }
++      }
++      try {
++        return net::addr_to_normalized_string(boost::asio::ip::make_address(raw));
++      } catch (...) {
++        return raw;
++      }
++    }
++
+     /**
+      * @brief Stop the active streaming session and prevent new packets from being queued.
+      */
+diff --git i/src/stream.h w/src/stream.h
+index c0b0f962..dfb8917e 100644
+--- i/src/stream.h
++++ w/src/stream.h
+@@ -94,5 +94,12 @@ namespace stream {
+      * @return PEM certificate associated with the session's client.
+      */
+     const std::string &client_cert(session_t &session);
++    /**
++     * @brief Return the client address for a stream session.
++     *
++     * @param session Active streaming or pairing session for the request.
++     * @return Normalized client IP address, or empty when unknown.
++     */
++    std::string peer_address(session_t &session);
+   }  // namespace session
+ }  // namespace stream

@@ -19,6 +19,10 @@ $StreamSecs = 10
 if ($env:ECLIPSE_VIDEO_SMOKE_SECS) {
     $StreamSecs = [int]$env:ECLIPSE_VIDEO_SMOKE_SECS
 }
+$Resolution = "1920x1080"
+if ($env:ECLIPSE_SMOKE_RESOLUTION) {
+    $Resolution = $env:ECLIPSE_SMOKE_RESOLUTION
+}
 $PairGraceMs = 400
 $PinIntervalMs = 300
 $PinTries = 80
@@ -313,9 +317,9 @@ function Invoke-Client([string]$Ip) {
     $moonErr = Join-Path $env:TEMP "eclipse-moonlight-smoke.err"
     Set-Content -Path $moonLog -Value "" -Encoding utf8
     Set-Content -Path $moonErr -Value "" -Encoding utf8
-    Write-Smoke "Streaming to $Ip for ${StreamSecs}s (windowed 1080 H.264)"
+    Write-Smoke "Streaming to $Ip for ${StreamSecs}s (windowed $Resolution H.264)"
     $moon = Start-Process -FilePath $MoonBin -ArgumentList @(
-        "stream", "--1080", "--video-codec", "H.264", "--no-hdr", "--packet-size", "1024",
+        "stream", "--resolution", $Resolution, "--video-codec", "H.264", "--no-hdr", "--packet-size", "1024",
         "--display-mode", "windowed", $Ip, "Desktop"
     ) -RedirectStandardOutput $moonLog -RedirectStandardError $moonErr -PassThru -NoNewWindow
     for ($t = 0; $t -lt $StreamSecs; $t++) {

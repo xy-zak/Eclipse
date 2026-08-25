@@ -5,6 +5,13 @@ export type SidecarStatus = {
   hostTriple: string;
 };
 
+export type DisplayInfo = {
+  name: string;
+  width: number;
+  height: number;
+  focused: boolean;
+};
+
 export type LocalNode = {
   hostname: string;
   lanIp: string | null;
@@ -13,8 +20,7 @@ export type LocalNode = {
   linkSpeedMbps: number | null;
   rxBytes: number | null;
   txBytes: number | null;
-  displayWidth: number | null;
-  displayHeight: number | null;
+  displays: DisplayInfo[];
   os: string;
 };
 
@@ -26,6 +32,7 @@ export type Peer = {
   rxBytes: number | null;
   txBytes: number | null;
   os: string;
+  displays: DisplayInfo[];
 };
 
 export type DiscoverySnapshot = {
@@ -35,10 +42,42 @@ export type DiscoverySnapshot = {
   message: string | null;
 };
 
+export type ScaleOption = {
+  denominator: number;
+  width: number;
+  height: number;
+};
+
+export type StreamWindowStatus = {
+  displayIndex: number;
+  name: string;
+  nativeWidth: number;
+  nativeHeight: number;
+  streamWidth: number;
+  streamHeight: number;
+  windowOpen: boolean;
+};
+
+export type StreamPrefs = {
+  scale: number;
+  fps: number;
+  codec: string;
+  bitrateMbps: number;
+};
+
 export type SessionStatus = {
   connected: boolean;
   ip: string | null;
   width: number;
   height: number;
   fps: number;
+  scale: number;
+  codec: string;
+  bitrateMbps: number;
+  displays: StreamWindowStatus[];
+  scaleOptions: ScaleOption[];
+};
+
+export type InboundStream = {
+  ip: string;
 };

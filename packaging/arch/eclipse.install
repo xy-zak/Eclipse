@@ -1,0 +1,60 @@
+do_setcap() {
+  if [ -x /usr/bin/sunshine ] && command -v setcap >/dev/null 2>&1; then
+    setcap cap_sys_admin,cap_sys_nice+p /usr/bin/sunshine || true
+  fi
+}
+
+do_udev_reload() {
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules
+    udevadm trigger --property-match=DEVNAME=/dev/uinput || true
+    udevadm trigger --property-match=DEVNAME=/dev/uhid || true
+  fi
+  modprobe uinput 2>/dev/null || true
+  modprobe uhid 2>/dev/null || true
+}
+
+enable_eclipse_host() {
+  if [ ! -d /run/systemd/system ]; then
+    return 0
+  fi
+  mkdir -p /etc/eclipse/sunshine
+  if [ -x /usr/bin/sunshine ]; then
+    if [ -d /usr/lib/Eclipse ]; then
+      (cd /usr/lib/Eclipse && CONFIGURATION_DIRECTORY=/etc/eclipse /usr/bin/sunshine --creds eclipse eclipse) || true
+    else
+      CONFIGURATION_DIRECTORY=/etc/eclipse /usr/bin/sunshine --creds eclipse eclipse || true
+    fi
+  fi
+  systemctl daemon-reload || true
+  systemctl enable --now eclipse-host.service || true
+}
+
+post_install() {
+  groupadd -f input 2>/dev/null || true
+  if [ -n "${SUDO_USER}" ] && [ "${SUDO_USER}" != "root" ]; then
+    usermod -aG input "${SUDO_USER}" 2>/dev/null || true
+  fi
+  do_setcap
+  do_udev_reload
+  chmod 755 /usr/lib/eclipse/eclipse-hostctl 2>/dev/null || true
+  enable_eclipse_host
+  echo "Log out once so the input group applies. NVIDIA encode needs the vendor driver, not the CUDA toolkit."
+  echo "eclipse-host.service is enabled; Sunshine starts at boot without opening Eclipse."
+  echo "The Eclipse tray starts at login (Host streaming toggle). Close hides to the tray; Quit Eclipse leaves the host service running."
+}
+
+post_upgrade() {
+  do_setcap
+  do_udev_reload
+  chmod 755 /usr/lib/eclipse/eclipse-hostctl 2>/dev/null || true
+  enable_eclipse_host
+}
+
+post_remove() {
+  if [ -d /run/systemd/system ]; then
+    systemctl disable --now eclipse-host.service 2>/dev/null || true
+    systemctl daemon-reload || true
+  fi
+  do_udev_reload
+}

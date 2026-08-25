@@ -186,7 +186,7 @@ Write-Host "==> Configuring Sunshine (MSYS2 UCRT64)"
 Write-Host "Sunshine version: $sunTag"
 # Single-line cmake: bash -c only reliably sees one -c argument, and CRLF
 # backslash continuations are not line joins.
-Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF -DSUNSHINE_ENABLE_CUDA=$useCuda -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
+Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF -DSUNSHINE_ENABLE_CUDA=$useCuda -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
 
 Write-Host "==> Building Sunshine"
 Invoke-EclipseMsys2 -Command "cmake --build '$buildUnix' && cmake --install '$buildUnix'"
@@ -194,6 +194,14 @@ Invoke-EclipseMsys2 -Command "cmake --build '$buildUnix' && cmake --install '$bu
 $sunBin = Get-ChildItem -Path $Prefix -Recurse -Filter "sunshine.exe" | Select-Object -First 1
 if (-not $sunBin) { throw "sunshine.exe not found under $Prefix" }
 Copy-Item $sunBin.FullName (Join-Path $BinDir "sunshine-$Triple.exe") -Force
+
+$svcBin = Get-ChildItem -Path $BuildSun, $Prefix -Recurse -Filter "sunshinesvc.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if (-not $svcBin) { throw "sunshinesvc.exe not found under $BuildSun or $Prefix" }
+$svcDest = Join-Path $Root "src-tauri\resources\windows"
+New-Item -ItemType Directory -Force -Path $svcDest | Out-Null
+Copy-Item $svcBin.FullName (Join-Path $svcDest "sunshinesvc.exe") -Force
+Write-Host "Staged sunshinesvc.exe at $svcDest"
 
 $share = Join-Path $Prefix "share\sunshine"
 if (Test-Path $share) {
@@ -214,7 +222,7 @@ Write-Host "==> Building Moonlight"
 $fontDir = Join-Path $Root "assets\fonts"
 $moonFontDir = Join-Path $MoonlightSrc "app\res\eclipse"
 New-Item -ItemType Directory -Force -Path $moonFontDir | Out-Null
-foreach ($font in @("Archivo-SemiBold.ttf", "JetBrainsMono-Regular.ttf")) {
+foreach ($font in @("Remboy-Regular.ttf", "JetBrainsMono-Regular.ttf")) {
     $src = Join-Path $fontDir $font
     if (-not (Test-Path $src)) { throw "Missing Eclipse font $src" }
     Copy-Item $src $moonFontDir -Force

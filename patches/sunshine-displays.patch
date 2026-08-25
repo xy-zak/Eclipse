@@ -1,0 +1,476 @@
+diff --git i/src/confighttp.cpp w/src/confighttp.cpp
+index eee5677b..b4de403c 100644
+--- i/src/confighttp.cpp
++++ w/src/confighttp.cpp
+@@ -1622,6 +1622,35 @@ namespace confighttp {
+     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
+   }
+ 
++  /**
++   * @brief List connected host displays with physical current-mode size.
++   *
++   * @api_examples{/api/displays| GET| null}
++   */
++  void getDisplays(const resp_https_t &response, const req_https_t &request) {
++    if (!authenticate(response, request)) {
++      return;
++    }
++
++    print_req(request);
++
++    nlohmann::json output_tree;
++    output_tree["status"] = true;
++    nlohmann::json displays = nlohmann::json::array();
++    const auto info = platf::display_info(platf::mem_type_e::unknown);
++    for (size_t i = 0; i < info.size(); ++i) {
++      nlohmann::json item;
++      item["index"] = i;
++      item["name"] = info[i].name;
++      item["width"] = info[i].width;
++      item["height"] = info[i].height;
++      item["focused"] = info[i].primary;
++      displays.push_back(std::move(item));
++    }
++    output_tree["displays"] = std::move(displays);
++    send_response(response, output_tree);
++  }
++
+   /**
+    * @brief Update existing credentials.
+    * @param response The HTTP response object.
+@@ -2219,6 +2248,7 @@ namespace confighttp {
+     server.resource["^/api/password$"]["POST"] = savePassword;
+     server.resource["^/api/pin$"]["POST"] = savePin;
+     server.resource["^/api/logs$"]["GET"] = getLogs;
++    server.resource["^/api/displays$"]["GET"] = getDisplays;
+     server.resource["^/api/reset-display-device-persistence$"]["POST"] = resetDisplayDevicePersistence;
+     server.resource["^/api/restart$"]["POST"] = restart;
+     server.resource["^/api/virtual-input/license$"]["GET"] = getVirtualInputLicense;
+diff --git i/src/nvhttp.cpp w/src/nvhttp.cpp
+index e260141a..3ec66c95 100644
+--- i/src/nvhttp.cpp
++++ w/src/nvhttp.cpp
+@@ -393,6 +393,7 @@ namespace nvhttp {
+     launch_session->continuous_audio = util::from_view(get_arg(args, "continuousAudio", "0"));
+     launch_session->gcmap = (int) util::from_view(get_arg(args, "gcmap", "0"));
+     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
++    launch_session->output_name = get_arg(args, "displayIndex", "");
+ 
+     // Encrypted RTSP is enabled with client reported corever >= 1
+     auto corever = util::from_view(get_arg(args, "corever", "0"));
+diff --git i/src/platform/common.h w/src/platform/common.h
+index dcb12687..517fbc38 100644
+--- i/src/platform/common.h
++++ w/src/platform/common.h
+@@ -906,6 +906,24 @@ namespace platf {
+    */
+   std::vector<std::string> display_names(mem_type_e hwdevice_type);
+ 
++  /**
++   * @brief Physical current-mode info for each capture output.
++   */
++  struct display_info_t {
++    std::string name;  ///< Connector or adapter output name.
++    int width;  ///< Current mode width in physical pixels.
++    int height;  ///< Current mode height in physical pixels.
++    bool primary;  ///< True for the first or OS-primary output.
++  };
++
++  /**
++   * @brief List connected displays with physical current-mode size.
++   *
++   * @param hwdevice_type Hardware device type requested for capture or encode.
++   * @return Display inventory for the selected capture backend.
++   */
++  std::vector<display_info_t> display_info(mem_type_e hwdevice_type);
++
+   /**
+    * @brief Check if GPUs/drivers have changed since the last call to this function.
+    * @return `true` if a change has occurred or if it is unknown whether a change occurred.
+diff --git i/src/platform/linux/kmsgrab.cpp w/src/platform/linux/kmsgrab.cpp
+index 9575e2c6..f83d27a6 100644
+--- i/src/platform/linux/kmsgrab.cpp
++++ w/src/platform/linux/kmsgrab.cpp
+@@ -2167,4 +2167,26 @@ namespace platf {
+     return display_names;
+   }
+ 
++  /**
++   * @brief List KMS outputs with physical current-mode size from CRTC viewports.
++   */
++  std::vector<display_info_t> kms_display_info(mem_type_e hwdevice_type) {
++    auto names = kms_display_names(hwdevice_type);
++    std::vector<display_info_t> displays;
++    displays.reserve(names.size());
++    std::vector<std::pair<int, int>> sizes(names.size(), {0, 0});
++    for (auto &card_descriptor : kms::card_descriptors) {
++      for (auto &[_, monitor_descriptor] : card_descriptor.crtc_to_monitor) {
++        auto idx = monitor_descriptor.monitor_index;
++        if (idx < names.size()) {
++          sizes[idx] = {monitor_descriptor.viewport.width, monitor_descriptor.viewport.height};
++        }
++      }
++    }
++    for (size_t i = 0; i < names.size(); ++i) {
++      displays.push_back(display_info_t {names[i], sizes[i].first, sizes[i].second, i == 0});
++    }
++    return displays;
++  }
++
+ }  // namespace platf
+diff --git i/src/platform/linux/misc.cpp w/src/platform/linux/misc.cpp
+index de36d54a..12af1698 100644
+--- i/src/platform/linux/misc.cpp
++++ w/src/platform/linux/misc.cpp
+@@ -1147,6 +1147,7 @@ namespace platf {
+    * @return Wayland display names, or an empty list when discovery fails.
+    */
+   std::vector<std::string> wl_display_names();
++  std::vector<display_info_t> wl_display_info();
+   /**
+    * @brief Create a Wayland display capture backend.
+    *
+@@ -1169,6 +1170,7 @@ namespace platf {
+ 
+ #ifdef SUNSHINE_BUILD_DRM
+   std::vector<std::string> kms_display_names(mem_type_e hwdevice_type);
++  std::vector<display_info_t> kms_display_info(mem_type_e hwdevice_type);
+   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+ 
+   bool verify_kms() {
+@@ -1243,6 +1245,34 @@ namespace platf {
+     return {};
+   }
+ 
++  /**
++   * @brief List connected displays with physical current-mode size.
++   */
++  std::vector<display_info_t> display_info(mem_type_e hwdevice_type) {
++#ifdef SUNSHINE_BUILD_WAYLAND
++    if (sources[source::WAYLAND]) {
++      return wl_display_info();
++    }
++#endif
++#ifdef SUNSHINE_BUILD_DRM
++    if (sources[source::KMS]) {
++      return kms_display_info(hwdevice_type);
++    }
++#endif
++    auto names = display_names(hwdevice_type);
++    std::vector<display_info_t> displays;
++    displays.reserve(names.size());
++    for (size_t i = 0; i < names.size(); ++i) {
++      displays.push_back(display_info_t {
++        names[i],
++        0,
++        0,
++        i == 0,
++      });
++    }
++    return displays;
++  }
++
+   /**
+    * @brief Report whether encoder backends should be probed again before streaming.
+    *
+diff --git i/src/platform/linux/wlgrab.cpp w/src/platform/linux/wlgrab.cpp
+index 65020d62..43748270 100644
+--- i/src/platform/linux/wlgrab.cpp
++++ w/src/platform/linux/wlgrab.cpp
+@@ -580,4 +580,43 @@ namespace platf {
+     return display_names;
+   }
+ 
++  /**
++   * @brief Enumerate Wayland outputs with physical current-mode size.
++   */
++  std::vector<platf::display_info_t> wl_display_info() {
++    std::vector<platf::display_info_t> displays;
++
++    wl::display_t display;
++    if (display.init()) {
++      return {};
++    }
++
++    wl::interface_t interface;
++    interface.listen(display.registry());
++
++    display.roundtrip();
++
++    if (!interface[wl::interface_t::XDG_OUTPUT] || !interface[wl::interface_t::WLR_EXPORT_DMABUF]) {
++      return {};
++    }
++
++    for (auto &monitor : interface.monitors) {
++      monitor->listen(interface.output_manager);
++    }
++
++    display.roundtrip();
++
++    for (int x = 0; x < interface.monitors.size(); ++x) {
++      auto monitor = interface.monitors[x].get();
++      platf::display_info_t info;
++      info.name = monitor->name.empty() ? std::to_string(x) : monitor->name;
++      info.width = monitor->viewport.width;
++      info.height = monitor->viewport.height;
++      info.primary = x == 0;
++      displays.emplace_back(std::move(info));
++    }
++
++    return displays;
++  }
++
+ }  // namespace platf
+diff --git i/src/platform/macos/display.mm w/src/platform/macos/display.mm
+index d5fe3d02..b1dda386 100644
+--- i/src/platform/macos/display.mm
++++ w/src/platform/macos/display.mm
+@@ -297,6 +297,16 @@ namespace platf {
+     return display_names;
+   }
+ 
++  std::vector<display_info_t> display_info(mem_type_e hwdevice_type) {
++    auto names = display_names(hwdevice_type);
++    std::vector<display_info_t> displays;
++    displays.reserve(names.size());
++    for (size_t i = 0; i < names.size(); ++i) {
++      displays.push_back(display_info_t {names[i], 0, 0, i == 0});
++    }
++    return displays;
++  }
++
+   /**
+    * @brief Report whether encoder backends should be probed again before streaming.
+    *
+diff --git i/src/platform/windows/display_base.cpp w/src/platform/windows/display_base.cpp
+index b297b90a..bb02f5cd 100644
+--- i/src/platform/windows/display_base.cpp
++++ w/src/platform/windows/display_base.cpp
+@@ -1117,6 +1117,48 @@ namespace platf {
+     return display_names;
+   }
+ 
++  /**
++   * @brief List connected displays with physical current-mode size.
++   */
++  std::vector<display_info_t> display_info(mem_type_e hwdevice_type) {
++    auto names = display_names(hwdevice_type);
++    std::vector<display_info_t> displays;
++    BOOST_LOG(debug) << "Detecting monitors..."sv;
++
++    syncThreadDesktop();
++
++    dxgi::factory1_t factory;
++    HRESULT status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
++    if (FAILED(status)) {
++      for (size_t i = 0; i < names.size(); ++i) {
++        displays.push_back(display_info_t {names[i], 0, 0, i == 0});
++      }
++      return displays;
++    }
++
++    dxgi::adapter_t::pointer adapter_p;
++    for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
++      dxgi::adapter_t adapter {adapter_p};
++      dxgi::output_t::pointer output_p {};
++      for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
++        dxgi::output_t output {output_p};
++        DXGI_OUTPUT_DESC desc;
++        output->GetDesc(&desc);
++        if (!desc.AttachedToDesktop) {
++          continue;
++        }
++        auto device_name = utf_utils::to_utf8(desc.DeviceName);
++        display_info_t info;
++        info.name = device_name;
++        info.width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
++        info.height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
++        info.primary = displays.empty();
++        displays.emplace_back(std::move(info));
++      }
++    }
++    return displays;
++  }
++
+   /**
+    * @brief Check whether DXGI reports that adapter or driver enumeration is stale.
+    *
+diff --git i/src/rtsp.cpp w/src/rtsp.cpp
+index 423df9d4..5e5ba6cf 100644
+--- i/src/rtsp.cpp
++++ w/src/rtsp.cpp
+@@ -1203,6 +1203,7 @@ namespace rtsp_stream {
+       config.monitor.dynamicRange = (int) util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
+       config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
+       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
++      config.monitor.output_name = session.output_name;
+ 
+       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+     } catch (std::out_of_range &) {
+diff --git i/src/rtsp.h w/src/rtsp.h
+index 7857835f..2a937805 100644
+--- i/src/rtsp.h
++++ w/src/rtsp.h
+@@ -38,6 +38,7 @@ namespace rtsp_stream {
+     bool continuous_audio;  ///< Whether audio packets continue during silence.
+     bool enable_hdr;  ///< Whether HDR streaming is requested.
+     bool enable_sops;  ///< Whether sequence output protection is requested.
++    std::string output_name;  ///< Host display name or index requested by the client.
+ 
+     std::optional<crypto::cipher::gcm_t> rtsp_cipher;  ///< AES-GCM cipher used once encrypted RTSP is negotiated.
+     std::string rtsp_url_scheme;  ///< URL scheme selected by the RTSP SETUP flow.
+diff --git i/src/video.cpp w/src/video.cpp
+index b6ea5624..5db309c5 100644
+--- i/src/video.cpp
++++ w/src/video.cpp
+@@ -8,6 +8,10 @@
+ #include <atomic>
+ #include <bitset>
+ #include <list>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
+ #include <thread>
+ #include <utility>
+ 
+@@ -683,6 +687,22 @@ namespace video {
+   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
+   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
+ 
++  using capture_async_pool_t = decltype(capture_thread_async);
++  std::mutex capture_async_pools_lock;
++  std::map<std::string, std::unique_ptr<capture_async_pool_t>> capture_async_pools;
++
++  capture_async_pool_t &capture_pool_for(const std::string &key) {
++    if (key.empty()) {
++      return capture_thread_async;
++    }
++    std::lock_guard lg(capture_async_pools_lock);
++    auto &slot = capture_async_pools[key];
++    if (!slot) {
++      slot = std::make_unique<capture_async_pool_t>(start_capture_async, end_capture_async);
++    }
++    return *slot;
++  }
++
+ #ifdef _WIN32
+   /**
+    * @brief NVENC.
+@@ -1449,9 +1469,10 @@ namespace video {
+    * @param display_names The list of display names to repopulate.
+    * @param current_display_index The current display index or -1 if not yet known.
+    */
+-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
++  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, const std::string &preferred_output = {}) {
+     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
+-    const auto output_name {display_device::map_output_name(config::video.output_name)};
++    const auto configured_name {display_device::map_output_name(config::video.output_name)};
++    const auto output_name = preferred_output.empty() ? configured_name : preferred_output;
+     std::string current_display_name;
+ 
+     // If we have a current display index, let's start with that
+@@ -1472,6 +1493,26 @@ namespace video {
+       display_names.emplace_back(output_name);
+     }
+ 
++    auto index_of = [&](const std::string &requested) -> int {
++      if (requested.empty()) {
++        return -1;
++      }
++      try {
++        std::size_t consumed = 0;
++        const int idx = std::stoi(requested, &consumed);
++        if (consumed == requested.size() && idx >= 0 && idx < static_cast<int>(display_names.size())) {
++          return idx;
++        }
++      } catch (...) {
++      }
++      for (int x = 0; x < static_cast<int>(display_names.size()); ++x) {
++        if (display_names[x] == requested) {
++          return x;
++        }
++      }
++      return -1;
++    };
++
+     // We now have a new display name list, so reset the index back to 0
+     current_display_index = 0;
+ 
+@@ -1486,13 +1527,11 @@ namespace video {
+ 
+       // The old display was removed, so we'll start back at the first display again
+       BOOST_LOG(warning) << "Previous active display ["sv << current_display_name << "] is no longer present"sv;
+-    } else {
+-      for (int x = 0; x < display_names.size(); ++x) {
+-        if (display_names[x] == output_name) {
+-          current_display_index = x;
+-          return;
+-        }
+-      }
++    }
++
++    const int preferred_index = index_of(output_name);
++    if (preferred_index >= 0) {
++      current_display_index = preferred_index;
+     }
+   }
+ 
+@@ -1537,7 +1576,8 @@ namespace video {
+     // get the most up-to-date list available monitors
+     std::vector<std::string> display_names;
+     int display_p = -1;
+-    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
++    const auto preferred_output = capture_ctxs.front().config.output_name;
++    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, preferred_output);
+     auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+     if (!disp) {
+       return;
+@@ -1726,7 +1766,7 @@ namespace video {
+               disp.reset();
+ 
+               // Refresh display names since a display removal might have caused the reinitialization
+-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
++              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, preferred_output);
+ 
+               // Process any pending display switch with the new list of displays
+               if (switch_display_event->peek()) {
+@@ -2650,7 +2690,7 @@ namespace video {
+ 
+     while (encode_session_ctx_queue.running()) {
+       // Refresh display names since a display removal might have caused the reinitialization
+-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
++      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, synced_session_ctxs.front()->config.output_name);
+ 
+       // Process any pending display switch with the new list of displays
+       if (switch_display_event->peek()) {
+@@ -2830,7 +2870,7 @@ namespace video {
+       shutdown_event->raise(true);
+     });
+ 
+-    auto ref = capture_thread_async.ref();
++    auto ref = capture_pool_for(config.output_name).ref();
+     if (!ref) {
+       return;
+     }
+diff --git i/src/video.h w/src/video.h
+index 42cd47d3..d207a9f2 100644
+--- i/src/video.h
++++ w/src/video.h
+@@ -6,7 +6,7 @@
+ 
+ // standard includes
+ #include <chrono>
+-#include <string_view>
++#include <string>
+ 
+ // local includes
+ #include "input.h"
+@@ -39,6 +39,7 @@ namespace video {
+     int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
+     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
+     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
++    std::string output_name;  ///< Capture output name for this session. Empty uses Sunshine config.
+   };
+ 
+   namespace amf {

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Eclipse
+Comment=Eclipse host tray (Sunshine stays a boot service)
+Exec=eclipse --tray
+Icon=eclipse
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
+StartupNotify=false
+Categories=Network;Utility;

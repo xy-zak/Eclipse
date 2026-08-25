@@ -10,6 +10,7 @@ UI_PASS="eclipse"
 UI_PORT=47990
 RTSP_PORT=48010
 STREAM_SECS="${ECLIPSE_VIDEO_SMOKE_SECS:-10}"
+RESOLUTION="${ECLIPSE_SMOKE_RESOLUTION:-1920x1080}"
 PAIR_GRACE=0.4
 PIN_INTERVAL=0.3
 PIN_TRIES=80
@@ -324,9 +325,9 @@ run_client() {
   mark="$(wc -l < "${slog}" 2>/dev/null || echo 0)"
   moon_log="${TMPDIR:-/tmp}/eclipse-moonlight-smoke.log"
   : > "${moon_log}"
-  log "Streaming to ${ip} for ${STREAM_SECS}s (windowed 1080 H.264)"
+  log "Streaming to ${ip} for ${STREAM_SECS}s (windowed ${RESOLUTION} H.264)"
   moonlight_cmd stream \
-    --1080 --video-codec H.264 --no-hdr --packet-size 1024 \
+    --resolution "${RESOLUTION}" --video-codec H.264 --no-hdr --packet-size 1024 \
     --display-mode windowed \
     "${ip}" Desktop >>"${moon_log}" 2>&1 &
   moon_pid=$!

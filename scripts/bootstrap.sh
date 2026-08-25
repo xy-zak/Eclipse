@@ -116,6 +116,44 @@ install_cuda_debian() {
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-cuda-toolkit
 }
 
+install_cuda_runfile() {
+  local ver="13.1.1"
+  local build="590.48.01"
+  local url="https://developer.download.nvidia.com/compute/cuda/${ver}/local_installers/cuda_${ver}_${build}_linux.run"
+  local tmp
+  tmp="$(mktemp -d)"
+  echo "CUDA: downloading toolkit runfile ${ver} (several GB, packager-only)..."
+  if ! curl -fL --progress-bar -o "${tmp}/cuda.run" "${url}"; then
+    echo "CUDA: failed to download ${url}" >&2
+    rm -rf "${tmp}"
+    return 1
+  fi
+  chmod +x "${tmp}/cuda.run"
+  sudo "${tmp}/cuda.run" --silent --toolkit --toolkitpath="/usr/local/cuda-${ver}" \
+    --no-opengl-libs --no-man-page --no-drm --override
+  sudo ln -sfn "/usr/local/cuda-${ver}" /usr/local/cuda
+  rm -rf "${tmp}"
+}
+
+install_cuda_fedora_repo() {
+  local ver="${VERSION_ID%%.*}"
+  local arch
+  arch="$(uname -m)"
+  if [[ "${arch}" != "x86_64" ]]; then
+    return 1
+  fi
+  sudo dnf install -y dnf-plugins-core
+  local repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${ver}/x86_64/cuda-fedora${ver}.repo"
+  if ! curl -fsI "${repo}" >/dev/null 2>&1; then
+    echo "CUDA: no NVIDIA Fedora ${ver} repo at ${repo}"
+    return 1
+  fi
+  echo "CUDA: adding NVIDIA repo ${repo}"
+  sudo dnf config-manager addrepo --from-repofile="${repo}" --overwrite 2>/dev/null \
+    || sudo dnf config-manager --add-repo "${repo}"
+  sudo dnf install -y cuda-nvcc || sudo dnf install -y cuda-toolkit || sudo dnf install -y "cuda-toolkit-13-1"
+}
+
 install_cuda_fedora() {
   if sudo dnf install -y cuda-nvcc; then
     return 0
@@ -123,7 +161,15 @@ install_cuda_fedora() {
   if sudo dnf install -y nvidia-cuda-toolkit; then
     return 0
   fi
-  echo "CUDA: no cuda-nvcc or nvidia-cuda-toolkit package in Fedora repos; skipping."
+  if sudo dnf install -y cuda-toolkit; then
+    return 0
+  fi
+  echo "CUDA: distro packages missing; trying NVIDIA Fedora repo (packager toolkit only)."
+  if install_cuda_fedora_repo; then
+    return 0
+  fi
+  echo "CUDA: installing toolkit from NVIDIA runfile (does not install the GPU driver)."
+  install_cuda_runfile
 }
 
 maybe_install_cuda() {
@@ -206,7 +252,7 @@ pkg_fedora() {
     miniupnpc-devel numactl-devel opus-devel \
     qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel qt6-qtwayland \
     SDL2-devel SDL2_ttf-devel ffmpeg-devel libplacebo-devel vulkan-headers \
-    libva-utils mesa-dri-drivers intel-media-driver
+    libva-utils mesa-dri-drivers intel-media-driver dnf-plugins-core
 }
 
 echo "Eclipse bootstrap"
