@@ -99,6 +99,20 @@ if [[ ! -d "${ROOT}/node_modules" ]]; then
   npm install
 fi
 
+# Cursor and some CI setups set CARGO_TARGET_DIR outside src-tauri/target.
+# PKGBUILD installs from src-tauri/target/release, so copy the just-built binaries there.
+stage_release_binaries() {
+  local dest="${ROOT}/src-tauri/target/release"
+  local src="${CARGO_TARGET_DIR:-${ROOT}/src-tauri/target}/release"
+  mkdir -p "${dest}"
+  local b
+  for b in eclipse sunshine moonlight; do
+    if [[ -x "${src}/${b}" && ! "${src}/${b}" -ef "${dest}/${b}" ]]; then
+      install -Dm755 "${src}/${b}" "${dest}/${b}"
+    fi
+  done
+}
+
 echo "==> Packaging for ${family} (${ID})"
 case "${family}" in
   debian)
@@ -118,6 +132,7 @@ case "${family}" in
   arch)
     need makepkg
     npm run tauri -- build --no-bundle
+    stage_release_binaries
     if [[ ! -x src-tauri/target/release/sunshine ]]; then
       # tauri --no-bundle still copies externalBin next to the app binary.
       echo "Expected src-tauri/target/release/sunshine after tauri --no-bundle." >&2

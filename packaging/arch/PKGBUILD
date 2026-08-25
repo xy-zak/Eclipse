@@ -3,7 +3,7 @@
 
 pkgname=eclipse
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Peer-to-peer remote desktop (Sunshine host + Moonlight client)'
 arch=('x86_64')
 url='https://github.com'
