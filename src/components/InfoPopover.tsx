@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   Popover,
   PopoverBackdrop,
@@ -5,29 +6,47 @@ import {
   PopoverPanel,
 } from "@headlessui/react";
 import { DROPDOWN_TRIGGER_OPEN, DROPDOWN_WIDTH } from "./dropdown";
-import { PixelIcon } from "./PixelIcon";
+import { PixelIcon, type PixelIconName } from "./PixelIcon";
 
-const SHORTCUTS: { keys: string; action: string }[] = [
-  { keys: "Ctrl+Alt+Esc", action: "Disconnect all windows" },
-  { keys: "Ctrl+Alt+F", action: "Fullscreen this window" },
-  { keys: "Ctrl+Alt+-", action: "List host displays" },
-  { keys: "Ctrl+Alt+1–9", action: "This window → host display N" },
-  { keys: "Ctrl+Alt+0", action: "One window per host display" },
-  { keys: "Ctrl+Alt+Q", action: "Close this window" },
-];
+export type MenuAccent = "moonlight" | "sunshine" | "tailscale";
 
-export function InfoPopover() {
+const CHROME: Record<MenuAccent, string> = {
+  moonlight:
+    "border-moonlight bg-eclipse text-moonlight hover:bg-moonlight hover:text-eclipse",
+  sunshine:
+    "border-sunshine bg-eclipse text-sunshine hover:bg-sunshine hover:text-eclipse",
+  tailscale:
+    "border-tailscale bg-eclipse text-tailscale hover:bg-tailscale hover:text-eclipse",
+};
+
+const PANEL: Record<MenuAccent, string> = {
+  moonlight: "border-moonlight text-moonlight",
+  sunshine: "border-sunshine text-sunshine",
+  tailscale: "border-tailscale text-tailscale",
+};
+
+export function InfoMenu({
+  accent,
+  icon = "info-circle",
+  label,
+  children,
+}: {
+  accent: MenuAccent;
+  icon?: PixelIconName;
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <Popover className={({ open }) => (open ? "relative z-50 isolate" : "")}>
       {({ open }) => (
         <>
           <PopoverButton
-            aria-label="Info"
-            className={`inline-flex h-9 w-9 items-center justify-center border border-moonlight bg-eclipse text-moonlight hover:bg-moonlight hover:text-eclipse ${
+            aria-label={label}
+            className={`inline-flex h-9 w-9 items-center justify-center border ${CHROME[accent]} ${
               open ? DROPDOWN_TRIGGER_OPEN : ""
             }`}
           >
-            <PixelIcon name="exclamation" size={16} />
+            <PixelIcon name={icon} size={16} />
           </PopoverButton>
           <PopoverBackdrop
             transition
@@ -36,47 +55,54 @@ export function InfoPopover() {
           <PopoverPanel
             modal={false}
             anchor="bottom end"
-            className={`z-50 mt-1 max-h-[min(36rem,calc(100dvh-5rem))] overflow-y-auto ${DROPDOWN_WIDTH} border border-moonlight bg-eclipse p-4 text-left text-sm text-moonlight outline-none`}
+            className={`z-50 mt-1 max-h-[min(36rem,calc(100dvh-5rem))] overflow-y-auto ${DROPDOWN_WIDTH} border bg-eclipse p-4 text-left text-sm outline-none ${PANEL[accent]}`}
           >
-            <p className="font-medium uppercase tracking-widest text-moonlight/70">
-              This PC
-            </p>
-            <p className="mt-2 text-moonlight/70">
-              Host streaming (tray) lets other machines on your Tailscale
-              network control this desktop. Pause it from the tray when you do
-              not want that.
-            </p>
-            <p className="mt-2 text-moonlight/70">
-              Host admin is the local Sunshine page (username eclipse). Copy
-              the Web UI password from this panel if you need it; Connect does
-              not use that password.
-            </p>
-            <p className="mt-4 font-medium uppercase tracking-widest text-moonlight/70">
-              Host certificates
-            </p>
-            <p className="mt-2 text-moonlight/70">
-              If Connect warns that a host certificate changed, trust it only
-              after a reinstall of Eclipse on that PC. App updates do not
-              rotate the certificate.
-            </p>
-            <p className="mt-4 font-medium uppercase tracking-widest text-moonlight/70">
-              Stream shortcuts
-            </p>
-            <p className="mt-2 text-moonlight/70">
-              While a Moonlight window is focused. Combos are not sent to the
-              host.
-            </p>
-            <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-8 gap-y-2">
-              {SHORTCUTS.map((row) => (
-                <div key={row.keys} className="contents">
-                  <dt className="font-medium">{row.keys}</dt>
-                  <dd className="text-right text-moonlight/70">{row.action}</dd>
-                </div>
-              ))}
-            </dl>
+            <div className="flex flex-col gap-4">{children}</div>
           </PopoverPanel>
         </>
       )}
     </Popover>
+  );
+}
+
+export function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div>
+      <p className="font-medium uppercase tracking-widest text-moonlight/70">
+        {title}
+      </p>
+      <p className="mt-2 text-moonlight/70">{children}</p>
+    </div>
+  );
+}
+
+export function HostsInfoPopover() {
+  return (
+    <InfoMenu accent="sunshine" label="Connecting to hosts">
+      <Section title="Other PCs">
+        Each card is another Eclipse machine on your Tailscale network. Connect
+        pairs if needed and opens a Moonlight window on that desktop.
+      </Section>
+      <Section title="When Connect works">
+        The host needs Tailscale online and Eclipse (Sunshine) on. Refresh the
+        list if a PC just woke or you just turned hosting on there. You cannot
+        Connect while this PC is already streaming to a client.
+      </Section>
+      <Section title="Stream quality">
+        The cog sets codec, scale, fps, and bandwidth for the next Connect, and
+        respawns an active stream. Scale is encode size relative to the host
+        monitor; it does not change the host display mode. Monitor names and
+        sizes are on each host card, not in settings.
+      </Section>
+      <Section title="Certificates">
+        If Connect warns that a host certificate changed, trust it only after a
+        reinstall of Eclipse on that PC. App updates do not rotate the
+        certificate.
+      </Section>
+      <Section title="Leaving">
+        Disconnect on the host card, or Ctrl+Alt+Esc in a stream window. Display
+        switching and other shortcuts are under the CLIENT command icon.
+      </Section>
+    </InfoMenu>
   );
 }

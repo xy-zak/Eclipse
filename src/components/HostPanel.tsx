@@ -1,4 +1,5 @@
-import type { DisplayInfo, Peer } from "../types";
+import type { Peer } from "../types";
+import { dash, formatDisplays } from "../format";
 import { Button } from "./Button";
 import { InfoRow, Panel } from "./Panel";
 import { PixelIcon } from "./PixelIcon";
@@ -16,24 +17,6 @@ type Props = {
   onDisconnect: () => void;
   flashKey?: number;
 };
-
-function dash(value: string | null | undefined): string {
-  if (value === null || value === undefined || value === "") {
-    return "—";
-  }
-  return value;
-}
-
-function formatDisplays(displays: DisplayInfo[]): string {
-  if (!displays.length) {
-    return "—";
-  }
-  return displays
-    .map((d) =>
-      d.name ? `${d.name} ${d.width}×${d.height}` : `${d.width}×${d.height}`,
-    )
-    .join(", ");
-}
 
 export function HostPanel({
   peer,
@@ -82,9 +65,10 @@ export function HostPanel({
         />
       ) : null}
       <InfoRow label="Operating system" value={dash(peer.os)} />
+      <InfoRow label="Window manager" value={dash(peer.windowManager)} />
       <InfoRow label="Tailscale IP" value={peer.ip} />
       <InfoRow
-        label="Host displays"
+        label="Displays"
         value={peer.hostOnline ? formatDisplays(peer.displays) : "—"}
       />
       <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-sunshine pt-4">
@@ -92,7 +76,7 @@ export function HostPanel({
           ok={peer.tailscaleOnline}
           label="Tailscale"
           icon={<PixelIcon name="chart-network" size={14} />}
-          tone="sunshine"
+          tone="tailscale"
         />
         <StatusMark
           ok={peer.hostOnline}

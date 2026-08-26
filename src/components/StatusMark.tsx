@@ -5,11 +5,16 @@ type Props = {
   ok: boolean;
   label: string;
   icon?: ReactNode;
-  tone?: "moonlight" | "sunshine";
+  tone?: "moonlight" | "sunshine" | "tailscale";
 };
 
 export function StatusMark({ ok, label, icon, tone = "moonlight" }: Props) {
-  const iconColor = tone === "sunshine" ? "text-sunshine" : "text-moonlight";
+  const iconColor =
+    tone === "sunshine"
+      ? "text-sunshine"
+      : tone === "tailscale"
+        ? "text-tailscale"
+        : "text-moonlight";
   return (
     <span className="inline-flex items-center gap-2 text-sm">
       {icon ? <span className={iconColor}>{icon}</span> : null}

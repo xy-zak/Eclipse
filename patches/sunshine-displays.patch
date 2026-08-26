@@ -1,17 +1,211 @@
 Subject: sunshine-displays
-Why: GET /api/displays and displayIndex -> host output_name for per-display capture.
+Why: GET /api/displays (inventory, OS, window manager) and displayIndex -> host output_name for per-display capture.
 Depends-on: vendor/PINS sunshine; apply before sunshine-sessions.patch
 
 diff --git i/src/confighttp.cpp w/src/confighttp.cpp
 index eee5677b..b4de403c 100644
 --- i/src/confighttp.cpp
 +++ w/src/confighttp.cpp
-@@ -1622,6 +1622,35 @@ namespace confighttp {
+@@ -10,5 +10,7 @@
+ #include <algorithm>
++#include <cctype>
+ #include <charconv>
++#include <cstdlib>
+ #include <filesystem>
+ #include <format>
+ #include <fstream>
+@@ -1622,6 +1624,223 @@ namespace confighttp {
      response->write(SimpleWeb::StatusCode::success_ok, content, headers);
    }
  
++  const char *eclipse_env(const char *name) {
++    const char *value = std::getenv(name);
++    if (!value || !*value) {
++      return nullptr;
++    }
++    return value;
++  }
++
++  std::string eclipse_title_id(std::string id) {
++    if (id.empty()) {
++      return id;
++    }
++    id[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(id[0])));
++    return id;
++  }
++
++  std::string eclipse_distro_short(std::string name) {
++    constexpr std::string_view gnu = " GNU/Linux";
++    if (name.size() >= gnu.size() && name.compare(name.size() - gnu.size(), gnu.size(), gnu) == 0) {
++      name.erase(name.size() - gnu.size());
++    }
++    constexpr std::string_view linux_suffix = " Linux";
++    if (name.size() >= linux_suffix.size() && name.compare(name.size() - linux_suffix.size(), linux_suffix.size(), linux_suffix) == 0) {
++      name.erase(name.size() - linux_suffix.size());
++    }
++    if (name.rfind("Linux ", 0) == 0) {
++      name.erase(0, 6);
++    }
++    return name;
++  }
++
++#ifndef _WIN32
++  std::string eclipse_os_release_field(const char *key) {
++    std::ifstream in("/etc/os-release");
++    std::string line;
++    const std::string prefix = std::string(key) + "=";
++    while (std::getline(in, line)) {
++      if (!line.empty() && line.back() == '\r') {
++        line.pop_back();
++      }
++      if (line.rfind(prefix, 0) != 0) {
++        continue;
++      }
++      auto value = line.substr(prefix.size());
++      if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
++        value = value.substr(1, value.size() - 2);
++      }
++      return value;
++    }
++    return {};
++  }
++
++  std::string eclipse_linux_os_pretty() {
++    auto name = eclipse_os_release_field("NAME");
++    auto id = eclipse_os_release_field("ID");
++    auto distro = eclipse_distro_short(name);
++    if (distro.empty()) {
++      distro = eclipse_title_id(id);
++    }
++    if (distro.empty()) {
++      return "Linux";
++    }
++    auto version = eclipse_os_release_field("VERSION_ID");
++    if (version.empty()) {
++      version = eclipse_os_release_field("VERSION");
++      if (const auto space = version.find(' '); space != std::string::npos) {
++        version.erase(space);
++      }
++    }
++    if (version.empty() || boost::iequals(version, "rolling")) {
++      return "Linux " + distro;
++    }
++    return "Linux " + distro + " " + version;
++  }
++
++  std::string eclipse_wayland_from_runtime() {
++    std::error_code ec;
++    const std::filesystem::path root {"/run/user"};
++    if (!std::filesystem::is_directory(root, ec)) {
++      return {};
++    }
++    for (const auto &user : std::filesystem::directory_iterator(root, ec)) {
++      if (!user.is_directory()) {
++        continue;
++      }
++      const bool hypr = std::filesystem::is_directory(user.path() / "hypr", ec);
++      bool wayland = false;
++      for (const auto &entry : std::filesystem::directory_iterator(user.path(), ec)) {
++        if (entry.path().filename().string().rfind("wayland-", 0) == 0) {
++          wayland = true;
++          break;
++        }
++      }
++      if (hypr) {
++        return "Hyprland (Wayland)";
++      }
++      if (wayland) {
++        return "Wayland";
++      }
++    }
++    return {};
++  }
++#endif
++
++#ifdef _WIN32
++  std::string eclipse_windows_os_pretty() {
++    registry_key_t key;
++    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, key.put()) != ERROR_SUCCESS) {
++      return "Windows";
++    }
++    const auto build_text = read_registry_string_value(key.get(), L"CurrentBuildNumber");
++    const auto display_version = read_registry_string_value(key.get(), L"DisplayVersion");
++    unsigned long build = 0;
++    if (build_text) {
++      try {
++        build = std::stoul(utf_utils::to_utf8(*build_text));
++      }
++      catch (...) {
++      }
++    }
++    const char *family = build >= 22000 ? "Windows 11" : (build >= 10240 ? "Windows 10" : "Windows");
++    if (display_version && !display_version->empty()) {
++      return std::string(family) + " " + utf_utils::to_utf8(*display_version);
++    }
++    return family;
++  }
++#endif
++
++  std::string eclipse_os_pretty() {
++#ifdef _WIN32
++    return eclipse_windows_os_pretty();
++#else
++    return eclipse_linux_os_pretty();
++#endif
++  }
++
++  std::string eclipse_first_desktop(const char *current_desktop) {
++    if (!current_desktop || !*current_desktop) {
++      return {};
++    }
++    std::string value = current_desktop;
++    if (const auto pos = value.find(':'); pos != std::string::npos) {
++      value.erase(pos);
++    }
++    return value;
++  }
++
++  std::string eclipse_window_manager() {
++#ifdef _WIN32
++    return "Desktop Window Manager";
++#else
++    const char *hypr = eclipse_env("HYPRLAND_INSTANCE_SIGNATURE");
++    std::string desktop = eclipse_first_desktop(eclipse_env("XDG_CURRENT_DESKTOP"));
++    if (hypr || boost::iequals(desktop, "hyprland")) {
++      return "Hyprland (Wayland)";
++    }
++    std::string session;
++    if (const char *type = eclipse_env("XDG_SESSION_TYPE")) {
++      session = type;
++      boost::algorithm::to_lower(session);
++    }
++    else if (eclipse_env("WAYLAND_DISPLAY")) {
++      session = "wayland";
++    }
++    else if (eclipse_env("DISPLAY")) {
++      session = "x11";
++    }
++    if (session == "wayland") {
++      if (!desktop.empty() && !boost::iequals(desktop, "wayland")) {
++        return desktop + " (Wayland)";
++      }
++      return "Wayland";
++    }
++    if (session == "x11") {
++      if (!desktop.empty() && !boost::iequals(desktop, "x11")) {
++        return desktop + " (X11)";
++      }
++      return "X11";
++    }
++    if (!desktop.empty()) {
++      return desktop;
++    }
++    return eclipse_wayland_from_runtime();
++#endif
++  }
++
 +  /**
-+   * @brief List connected host displays with physical current-mode size.
++   * @brief List connected host displays with physical current-mode size, plus OS and window manager.
 +   *
 +   * @api_examples{/api/displays| GET| null}
 +   */
@@ -35,6 +229,8 @@ index eee5677b..b4de403c 100644
 +      item["focused"] = info[i].primary;
 +      displays.push_back(std::move(item));
 +    }
++    output_tree["os"] = eclipse_os_pretty();
++    output_tree["windowManager"] = eclipse_window_manager();
 +    output_tree["displays"] = std::move(displays);
 +    send_response(response, output_tree);
 +  }
@@ -42,7 +238,7 @@ index eee5677b..b4de403c 100644
    /**
     * @brief Update existing credentials.
     * @param response The HTTP response object.
-@@ -2219,6 +2248,7 @@ namespace confighttp {
+@@ -2219,6 +2438,7 @@ namespace confighttp {
      server.resource["^/api/password$"]["POST"] = savePassword;
      server.resource["^/api/pin$"]["POST"] = savePin;
      server.resource["^/api/logs$"]["GET"] = getLogs;

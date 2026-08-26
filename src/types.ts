@@ -2,6 +2,7 @@ export type SidecarStatus = {
   sunshinePresent: boolean;
   moonlightPresent: boolean;
   sunshineRunning: boolean;
+  keepHostOnExit: boolean;
   hostTriple: string;
 };
 
@@ -22,6 +23,7 @@ export type LocalNode = {
   txBytes: number | null;
   displays: DisplayInfo[];
   os: string;
+  windowManager: string;
 };
 
 export type Peer = {
@@ -32,6 +34,7 @@ export type Peer = {
   rxBytes: number | null;
   txBytes: number | null;
   os: string;
+  windowManager: string;
   displays: DisplayInfo[];
 };
 
@@ -63,6 +66,7 @@ export type StreamPrefs = {
   fps: number;
   codec: string;
   bitrateMbps: number;
+  hotkeyShift: boolean;
 };
 
 export type SessionStatus = {
@@ -74,6 +78,7 @@ export type SessionStatus = {
   scale: number;
   codec: string;
   bitrateMbps: number;
+  hotkeyShift: boolean;
   displays: StreamWindowStatus[];
   scaleOptions: ScaleOption[];
 };

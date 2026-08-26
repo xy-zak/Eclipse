@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::display::{self, DisplayInfo};
+use crate::hostinfo;
 use crate::pairing;
 use crate::sidecar::{hidden_command, probe_tcp_ms, SUNSHINE};
 #[cfg(not(windows))]
@@ -65,6 +66,7 @@ pub struct Peer {
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
     pub os: String,
+    pub window_manager: String,
     pub displays: Vec<DisplayInfo>,
 }
 
@@ -81,6 +83,7 @@ pub struct LocalNode {
     pub tx_bytes: Option<u64>,
     pub displays: Vec<DisplayInfo>,
     pub os: String,
+    pub window_manager: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -219,10 +222,17 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
         .into_iter()
         .map(|d| {
             let host_online = probe && SUNSHINE.probe_at(&d.ip, PROBE_TIMEOUT);
-            let displays = if host_online {
-                pairing::fetch_displays(&d.ip).unwrap_or_default()
+            let inventory = if host_online {
+                pairing::fetch_host_inventory(&d.ip)
             } else {
-                Vec::new()
+                None
+            };
+            let (displays, os, window_manager) = match inventory {
+                Some(h) => {
+                    let os = if h.os.is_empty() { d.os } else { h.os };
+                    (h.displays, os, h.window_manager)
+                }
+                None => (Vec::new(), d.os, String::new()),
             };
             Peer {
                 host_online,
@@ -231,7 +241,8 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
                 tailscale_online: d.tailscale_online,
                 rx_bytes: d.rx_bytes,
                 tx_bytes: d.tx_bytes,
-                os: d.os,
+                os,
+                window_manager,
                 displays,
             }
         })
@@ -256,14 +267,8 @@ fn local_from_self(node: &NodeJson) -> LocalNode {
         rx_bytes: node.rx_bytes,
         tx_bytes: node.tx_bytes,
         displays: display::local_displays(),
-        os: {
-            let from_ts = format_os(node.os.as_deref());
-            if from_ts.is_empty() {
-                native_os()
-            } else {
-                from_ts
-            }
-        },
+        os: hostinfo::local_os(),
+        window_manager: hostinfo::local_window_manager(),
     }
 }
 
@@ -277,7 +282,8 @@ fn local_without_tailscale() -> LocalNode {
         rx_bytes: None,
         tx_bytes: None,
         displays: display::local_displays(),
-        os: native_os(),
+        os: hostinfo::local_os(),
+        window_manager: hostinfo::local_window_manager(),
     }
 }
 
@@ -343,10 +349,6 @@ fn os_hostname() -> String {
         }
         "this PC".into()
     }
-}
-
-fn native_os() -> String {
-    format_os(Some(std::env::consts::OS))
 }
 
 fn format_os(os: Option<&str>) -> String {
@@ -531,7 +533,20 @@ mod tests {
         assert!(local.tailscale_online);
         assert_eq!(local.rx_bytes, Some(10));
         assert_eq!(local.tx_bytes, Some(20));
-        assert_eq!(local.os, "Linux");
+        #[cfg(target_os = "linux")]
+        assert!(
+            local.os.starts_with("Linux"),
+            "local OS should be a Linux distro label, got {}",
+            local.os
+        );
+        #[cfg(windows)]
+        assert!(
+            local.os.starts_with("Windows"),
+            "local OS should be a Windows label, got {}",
+            local.os
+        );
+        assert_eq!(work.window_manager, "");
+        assert_eq!(local.window_manager, hostinfo::local_window_manager());
     }
 
     #[test]

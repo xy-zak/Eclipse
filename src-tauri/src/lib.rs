@@ -1,9 +1,12 @@
 mod discovery;
 mod display;
 mod hostconf;
+mod hostinfo;
 mod pairing;
 mod session;
 mod sidecar;
+
+use std::sync::Mutex;
 
 use discovery::DiscoverySnapshot;
 use pairing::InboundStream;
@@ -12,6 +15,8 @@ use sidecar::{HostProcess, SidecarStatus};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, WindowEvent};
+
+static HOST_MENU: Mutex<Option<CheckMenuItem<tauri::Wry>>> = Mutex::new(None);
 
 #[tauri::command]
 async fn sidecar_status(app: tauri::AppHandle) -> SidecarStatus {
@@ -23,6 +28,7 @@ async fn sidecar_status(app: tauri::AppHandle) -> SidecarStatus {
         sunshine_present: false,
         moonlight_present: false,
         sunshine_running: false,
+        keep_host_on_exit: false,
         host_triple: env!("HOST_TRIPLE").to_string(),
     })
 }
@@ -66,6 +72,27 @@ fn open_host_admin() -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn set_host_running(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || handle.state::<HostProcess>().set_host_running(on))
+        .await
+        .map_err(|err| format!("Host toggle failed: {err}"))??;
+    if let Some(item) = HOST_MENU
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        sync_host_menu(&app, &item);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_keep_host_on_exit(app: tauri::AppHandle, on: bool) {
+    app.state::<HostProcess>().set_keep_host_on_exit(on);
+}
+
+#[tauri::command]
 fn disconnect(session: State<SessionProcess>) {
     session.stop();
 }
@@ -79,9 +106,18 @@ async fn peer_latency(ip: String) -> Option<u32> {
 }
 
 #[tauri::command]
-async fn connect(app: tauri::AppHandle, ip: String, trust_new_cert: bool) -> Result<(), String> {
+async fn connect(
+    app: tauri::AppHandle,
+    ip: String,
+    trust_new_cert: bool,
+    displays: Option<Vec<crate::display::DisplayInfo>>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<SessionProcess>().connect(&ip, trust_new_cert)
+        app.state::<SessionProcess>().connect(
+            &ip,
+            trust_new_cert,
+            displays.unwrap_or_default(),
+        )
     })
         .await
         .map_err(|err| format!("Connect task failed: {err}"))?
@@ -134,6 +170,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Eclipse", true, None::<&str>)?;
     let host_item =
         CheckMenuItem::with_id(app, "host", "Host streaming", true, host_on, None::<&str>)?;
+    *HOST_MENU.lock().unwrap_or_else(|e| e.into_inner()) = Some(host_item.clone());
     let host_for_menu = host_item.clone();
     let host_for_tray = host_item.clone();
     let quit = MenuItem::with_id(app, "quit", "Quit Eclipse", true, None::<&str>)?;
@@ -208,6 +245,8 @@ pub fn run() {
             force_disconnect_inbound,
             web_ui_password,
             open_host_admin,
+            set_host_running,
+            set_keep_host_on_exit,
             peer_latency,
             set_stream_prefs,
             open_all_displays
@@ -237,8 +276,13 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<SessionProcess>().stop();
-                // Kills only a child this process spawned; never a host service.
-                app.state::<HostProcess>().stop_sunshine();
+                let host = app.state::<HostProcess>();
+                if !host.keep_host_on_exit() {
+                    if let Err(err) = host.set_host_running(false) {
+                        eprintln!("Eclipse: stop host on quit failed ({err})");
+                        host.stop_sunshine();
+                    }
+                }
             }
         });
 }

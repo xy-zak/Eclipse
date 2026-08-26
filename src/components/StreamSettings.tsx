@@ -4,38 +4,15 @@ import {
   PopoverButton,
   PopoverPanel,
 } from "@headlessui/react";
-import type { DisplayInfo, StreamPrefs } from "../types";
+import type { StreamPrefs } from "../types";
 import { DROPDOWN_TRIGGER_OPEN, DROPDOWN_WIDTH } from "./dropdown";
 import { PixelIcon } from "./PixelIcon";
 
-export type StreamHostPreview = {
-  hostname: string;
-  displays: DisplayInfo[];
-};
-
 type Props = {
   prefs: StreamPrefs;
-  hosts: StreamHostPreview[];
   disabled: boolean;
   onChange: (prefs: StreamPrefs) => void;
 };
-
-function scaledSize(
-  width: number,
-  height: number,
-  denominator: number,
-): { width: number; height: number } | null {
-  const n = Math.max(denominator, 1);
-  if (width === 0 || height === 0) {
-    return null;
-  }
-  const w = Math.floor(width / n) & ~1;
-  const h = Math.floor(height / n) & ~1;
-  if (w < 2 || h < 2) {
-    return null;
-  }
-  return { width: w, height: h };
-}
 
 function Switch<T extends string | number>({
   label,
@@ -79,42 +56,7 @@ function Switch<T extends string | number>({
   );
 }
 
-function ScalePreview({
-  hosts,
-  scale,
-}: {
-  hosts: StreamHostPreview[];
-  scale: number;
-}) {
-  const rows = hosts.flatMap((host) =>
-    host.displays.flatMap((display) => {
-      const next = scaledSize(display.width, display.height, scale);
-      if (!next) {
-        return [];
-      }
-      const name = display.name
-        ? `${host.hostname} ${display.name}`
-        : host.hostname;
-      return [
-        `${name} ${display.width}×${display.height} → ${next.width}×${next.height}`,
-      ];
-    }),
-  );
-  if (rows.length === 0) {
-    return null;
-  }
-  return (
-    <ul className="mt-2 space-y-1 text-moonlight/70">
-      {rows.map((row) => (
-        <li key={row} className="wrap-break-word">
-          {row}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-export function StreamSettings({ prefs, hosts, disabled, onChange }: Props) {
+export function StreamSettings({ prefs, disabled, onChange }: Props) {
   const set = (patch: Partial<StreamPrefs>) => onChange({ ...prefs, ...patch });
   const scale = prefs.scale === 0 ? 1 : prefs.scale;
   return (
@@ -166,7 +108,6 @@ export function StreamSettings({ prefs, hosts, disabled, onChange }: Props) {
                   Encoded size relative to the host monitor. The host display
                   mode does not change.
                 </p>
-                <ScalePreview hosts={hosts} scale={scale} />
               </div>
               <Switch
                 label="FPS"

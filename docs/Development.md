@@ -9,12 +9,12 @@ How to ready a workstation and run Eclipse from this repository. Runtime conditi
 | Tauri 2 + React 19 + Vite + Tailwind v4 | Scaffolded (`com.eclipse.app`) |
 | Sunshine sidecar | Vendored at **v2026.824.30334**, compiled locally. Packages run it as a boot-time service; `tauri dev` spawns a child |
 | Moonlight-Qt sidecar | Vendored at commit **`d2f6990b`**, compiled locally, spawned on Connect |
-| Dashboard | Sidecar pills, Tailscale **Peers** list, per-row **Connect**, inbound stream on **CLIENT**, tray Host streaming toggle |
+| Dashboard | CLIENT status (Tailscale / Sunshine / Moonlight), CLIENT menus (Moonlight / Sunshine / Tailscale / shortcuts), Tailscale **Peers** list, per-row **Connect**, inbound stream on **CLIENT**, Host streaming toggle (tray and CLIENT sun menu) |
 | Tailscale discovery | `tailscale status --json` + TCP `:47990` probe (`discovery.rs`) |
 | Pairing / stream launch | `pairing.rs` POST `/api/pin`; `session.rs` `list` / `pair --pin` / `stream … Desktop` |
 | GitHub Actions installers | Not implemented (local `scripts/package.sh` / `package.ps1` first) |
 
-From source, **Quit Eclipse** in the tray kills the Sunshine child. Closing the window only hides it. Packaged installs leave `eclipse-host.service` / `SunshineService` as last toggled; reboot starts the host again. The UI still opens if Sunshine is missing or fails to start. `eclipse --tray` starts hidden.
+From source, **Quit Eclipse** in the tray stops the Sunshine child unless **Keep Sunshine Host running in background** is on. Closing the window only hides it. Packaged installs default to leaving `eclipse-host.service` / `SunshineService` running after quit; reboot starts the host again. The UI still opens if Sunshine is missing or fails to start. `eclipse --tray` starts hidden.
 
 ---
 

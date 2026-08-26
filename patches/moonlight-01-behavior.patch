@@ -1,5 +1,5 @@
 Subject: moonlight-01-behavior
-Why: Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, fill-client window, display-map popup, splash hold.
+Why: Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, fill-client window, Eclipse-styled display-map overlay, splash hold.
 Depends-on: vendor/PINS moonlight-qt; apply before moonlight-02-ui.patch
 
 diff --git a/app/backend/computermanager.cpp b/app/backend/computermanager.cpp
@@ -100,13 +100,13 @@ index 574098a6..d58ea945 100644
 -        emit computerFound(computer);
 +    if (!matchComputer(computer) || !isOnline(computer)) {
 +        return;
-+    }
+     }
 +    // Cached PCs often store LAN + WAN next to the Tailscale IP Eclipse
 +    // passed. Polling can mark them online on 192.168.x first; the stream
 +    // then uses that address and video UDP never comes back over 100.x.
 +    if (isAddressLiteral(m_ComputerName) && !activeAddressIs(computer, m_ComputerName)) {
 +        return;
-     }
++    }
 +    m_ComputerManager->stopPollingAsync();
 +    m_TimeoutTimer->stop();
 +    emit computerFound(computer);
@@ -150,23 +150,32 @@ index ea707801..626b9415 100644
      QVector<NvApp>
      getAppList();
 diff --git a/app/cli/commandlineparser.cpp b/app/cli/commandlineparser.cpp
-index 2acac458..262c88ca 100644
+index 2acac458..bd634ed0 100644
 --- a/app/cli/commandlineparser.cpp
 +++ b/app/cli/commandlineparser.cpp
-@@ -371,6 +371,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
+@@ -371,6 +371,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
      parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
      parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
      parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
 +    parser.addValueOption("host-display", "host display index (0-based)");
++    parser.addValueOption("eclipse-display-map", "host display map (index;shortcut;name|...)");
  
      if (!parser.parse(args)) {
          parser.showError(parser.errorText());
-@@ -506,6 +507,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
+@@ -506,6 +508,18 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
          preferences->videoDecoderSelection = mapValue(m_VideoDecoderMap, parser.getChoiceOptionValue("video-decoder"));
      }
  
 +    if (parser.isSet("host-display")) {
 +        preferences->hostDisplayIndex = parser.getIntOption("host-display");
++    }
++    // Must be set before the positional host/app. Env is a fallback for spawners
++    // that already put those positionals on the command line.
++    if (parser.isSet("eclipse-display-map")) {
++        preferences->eclipseDisplayMap = parser.value("eclipse-display-map");
++    }
++    if (preferences->eclipseDisplayMap.isEmpty()) {
++        preferences->eclipseDisplayMap = QString::fromUtf8(qgetenv("ECLIPSE_DISPLAY_MAP"));
 +    }
 +
      // This method will not return and terminates the process if --version or
@@ -354,57 +363,124 @@ index c0be000c..9ad13883 100644
          }
      case GlobalCommandLineParser::ListRequested:
 diff --git a/app/settings/streamingpreferences.h b/app/settings/streamingpreferences.h
-index ad611f6a..bce6412c 100644
+index ad611f6a..8a035632 100644
 --- a/app/settings/streamingpreferences.h
 +++ b/app/settings/streamingpreferences.h
-@@ -200,6 +200,7 @@ public:
+@@ -2,6 +2,7 @@
+ 
+ #include <QObject>
+ #include <QRect>
++#include <QString>
+ #include <QQmlEngine>
+ 
+ class StreamingPreferences : public QObject
+@@ -200,6 +201,8 @@ public:
      Language language;
      CaptureSysKeysMode captureSysKeysMode;
      RendererSelection rendererSelection;
 +    int hostDisplayIndex = -1;
++    QString eclipseDisplayMap;
  
  signals:
      void displayModeChanged();
 diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
 new file mode 100644
-index 00000000..ebaf3b85
+index 00000000..a42631c4
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.cpp
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,677 @@
 +#include "eclipsepopup.h"
 +#include "streaming/session.h"
 +
-+#include <QEventLoop>
-+#include <QFontMetrics>
-+#include <QGuiApplication>
++#include "SDL_compat.h"
++
++#include <QFile>
 +#include <QHostAddress>
-+#include <QKeyEvent>
-+#include <QMouseEvent>
-+#include <QPainter>
-+#include <QPen>
-+#include <QRasterWindow>
++#include <QList>
 +#include <QTcpServer>
 +#include <QTcpSocket>
 +#include <QThread>
 +
++#include <atomic>
++#include <cstdio>
++
++#include <SDL_ttf.h>
++
 +#ifdef Q_OS_WIN32
++#include <winsock2.h>
++#include <ws2tcpip.h>
 +#include <process.h>
 +#else
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
 +#include <unistd.h>
 +#endif
 +
 +namespace {
 +
-+const QColor kBg("#0f0f29");
-+const QColor kBorder("#f7c708");
-+const QColor kText("#d9d9fc");
-+const QColor kOkBg("#d9d9fc");
-+const QColor kOkFg("#0f0f29");
++const int kOverlayMs = 8000;
 +
-+QByteArray eclipseSend(const char* command, int readyMs = 400)
++std::atomic<int> g_hotkeyShift{-1};
++
++bool hotkeyShiftFromEnv()
++{
++    const QByteArray value = qgetenv("ECLIPSE_HOTKEY_SHIFT");
++    return !value.isEmpty() && value != "0";
++}
++
++void applyHotkeyShift(bool shift)
++{
++    g_hotkeyShift.store(shift ? 1 : 0);
++}
++
++bool hotkeyNeedsShift()
++{
++    int value = g_hotkeyShift.load();
++    if (value < 0) {
++        const int next = hotkeyShiftFromEnv() ? 1 : 0;
++        int expected = -1;
++        if (g_hotkeyShift.compare_exchange_strong(expected, next)) {
++            return next != 0;
++        }
++        return expected != 0;
++    }
++    return value != 0;
++}
++
++// --- Eclipse control socket (`ECLIPSE_CONTROL`) ---
++
++#ifdef Q_OS_WIN32
++using EclipseSocket = SOCKET;
++const EclipseSocket kInvalidSock = INVALID_SOCKET;
++
++void eclipseCloseSock(EclipseSocket fd)
++{
++    closesocket(fd);
++}
++#else
++using EclipseSocket = int;
++const EclipseSocket kInvalidSock = -1;
++
++void eclipseCloseSock(EclipseSocket fd)
++{
++    close(fd);
++}
++#endif
++
++unsigned eclipsePid()
++{
++#ifdef Q_OS_WIN32
++    return static_cast<unsigned>(_getpid());
++#else
++    return static_cast<unsigned>(getpid());
++#endif
++}
++
++QByteArray nativeEclipseSend(const char* command, int readyMs)
 +{
 +    const QByteArray dest = qgetenv("ECLIPSE_CONTROL");
-+    if (dest.isEmpty()) {
++    if (dest.isEmpty() || command == nullptr) {
 +        return {};
 +    }
 +    const QList<QByteArray> parts = dest.split(':');
@@ -416,18 +492,119 @@ index 00000000..ebaf3b85
 +    if (!ok || port == 0) {
 +        return {};
 +    }
-+    QTcpSocket sock;
-+    sock.connectToHost(QString::fromUtf8(parts.at(0)), port);
-+    if (!sock.waitForConnected(400)) {
++
++    EclipseSocket fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd == kInvalidSock) {
 +        return {};
 +    }
-+    sock.write(QByteArray(command) + '\n');
-+    sock.flush();
-+    sock.waitForBytesWritten(400);
-+    sock.waitForReadyRead(readyMs);
-+    const QByteArray reply = sock.readAll();
-+    sock.disconnectFromHost();
++
++    const int waitMs = qMax(readyMs, 200);
++#ifdef Q_OS_WIN32
++    DWORD tv = static_cast<DWORD>(waitMs);
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
++#else
++    timeval tv;
++    tv.tv_sec = waitMs / 1000;
++    tv.tv_usec = (waitMs % 1000) * 1000;
++    if (tv.tv_sec == 0 && tv.tv_usec == 0) {
++        tv.tv_usec = 200000;
++    }
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++#endif
++
++    sockaddr_in addr = {};
++    addr.sin_family = AF_INET;
++    addr.sin_port = htons(port);
++    const QByteArray host = parts.at(0);
++    if (inet_pton(AF_INET, host.constData(), &addr.sin_addr) != 1) {
++        eclipseCloseSock(fd);
++        return {};
++    }
++    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
++        eclipseCloseSock(fd);
++        return {};
++    }
++
++    QByteArray payload = QByteArray(command) + '\n';
++#ifdef Q_OS_WIN32
++    if (send(fd, payload.constData(), static_cast<int>(payload.size()), 0) < 0) {
++#else
++    if (send(fd, payload.constData(), static_cast<size_t>(payload.size()), 0) < 0) {
++#endif
++        eclipseCloseSock(fd);
++        return {};
++    }
++
++    QByteArray reply;
++    char buf[2048];
++    for (;;) {
++#ifdef Q_OS_WIN32
++        const int n = recv(fd, buf, sizeof(buf), 0);
++#else
++        const ssize_t n = recv(fd, buf, sizeof(buf), 0);
++#endif
++        if (n <= 0) {
++            break;
++        }
++        reply.append(buf, static_cast<int>(n));
++    }
++    eclipseCloseSock(fd);
 +    return reply;
++}
++
++// --- Host display map (`index;shortcut;name|...`) ---
++
++QStringList displayMapRows(const QString& hostList)
++{
++    if (hostList.contains(QLatin1Char('|'))) {
++        return hostList.split(QLatin1Char('|'), Qt::SkipEmptyParts);
++    }
++    return hostList.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
++}
++
++QStringList displayMapCols(const QString& line)
++{
++    if (line.contains(QLatin1Char('\t'))) {
++        return line.split(QLatin1Char('\t'));
++    }
++    return line.split(QLatin1Char(';'));
++}
++
++bool displayMapHasRows(const QString& hostList)
++{
++    const QStringList lines = displayMapRows(hostList);
++    for (const QString& line : lines) {
++        if (displayMapCols(line.trimmed()).size() >= 3) {
++            return true;
++        }
++    }
++    return false;
++}
++
++QString parseShowDisplaysReply(const QByteArray& reply)
++{
++    QString body = QString::fromUtf8(reply);
++    if (body.startsWith(QLatin1String("ok"))) {
++        const int nl = body.indexOf('\n');
++        return nl >= 0 ? body.mid(nl + 1).trimmed() : QString();
++    }
++    if (body.startsWith(QLatin1String("err"))) {
++        return {};
++    }
++    return body.trimmed();
++}
++
++QString resolveDisplayMap(const QString& hostList, const QString& stored)
++{
++    if (displayMapHasRows(hostList)) {
++        return hostList;
++    }
++    if (displayMapHasRows(stored)) {
++        return stored;
++    }
++    return QString::fromUtf8(qgetenv("ECLIPSE_DISPLAY_MAP"));
 +}
 +
 +QString activeDisplayName(int activeIndex, const QString& activeName)
@@ -445,10 +622,10 @@ index 00000000..ebaf3b85
 +{
 +    QString text;
 +    text += QStringLiteral("HOST DISPLAYS\n");
-+    const QStringList lines = hostList.split('\n', Qt::SkipEmptyParts);
++    const QStringList lines = displayMapRows(hostList);
 +    bool any = false;
 +    for (const QString& line : lines) {
-+        const QStringList cols = line.split('\t');
++        const QStringList cols = displayMapCols(line.trimmed());
 +        if (cols.size() < 3) {
 +            continue;
 +        }
@@ -463,73 +640,146 @@ index 00000000..ebaf3b85
 +    return text;
 +}
 +
-+class EclipseDisplayPopup : public QRasterWindow
++// --- Overlay chrome (navy card, gold border, JetBrains Mono) ---
++
++const SDL_Color kNavy{0x0F, 0x0F, 0x29, 0xFF};
++const SDL_Color kGold{0xF7, 0xC7, 0x08, 0xFF};
++const SDL_Color kLavender{0xD9, 0xD9, 0xFC, 0xFF};
++
++SDL_Surface* toArgb8888(SDL_Surface* src)
 +{
-+public:
-+    EclipseDisplayPopup(const QString& text, SDL_Window* anchor)
-+        : m_text(text)
-+    {
-+        setFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-+        setTitle(QStringLiteral("Host displays"));
-+        const QFont font = QGuiApplication::font();
-+        const QFontMetrics fm(font);
-+        const QRect bounds = fm.boundingRect(QRect(0, 0, 400, 2000), Qt::TextWordWrap, m_text);
-+        const int width = qBound(340, bounds.width() + 48, 520);
-+        const int height = bounds.height() + 96;
-+        resize(width, height);
-+        if (anchor) {
-+            int x = 0;
-+            int y = 0;
-+            int w = width;
-+            int h = height;
-+            SDL_GetWindowPosition(anchor, &x, &y);
-+            SDL_GetWindowSize(anchor, &w, &h);
-+            setPosition(x + (w - width) / 2, y + (h - height) / 2);
-+        }
-+        m_ok = QRect(width - 88, height - 44, 64, 28);
++    if (src == nullptr) {
++        return nullptr;
 +    }
-+
-+protected:
-+    void paintEvent(QPaintEvent*) override
-+    {
-+        QPainter p(this);
-+        const QRect bounds(0, 0, width(), height());
-+        p.fillRect(bounds, kBg);
-+        p.setPen(QPen(kBorder, 1));
-+        p.drawRect(bounds.adjusted(0, 0, -1, -1));
-+        p.setPen(kText);
-+        p.setFont(QGuiApplication::font());
-+        p.drawText(QRect(20, 18, width() - 40, height() - 72), Qt::TextWordWrap, m_text);
-+        p.fillRect(m_ok, kOkBg);
-+        p.setPen(kOkFg);
-+        p.drawText(m_ok, Qt::AlignCenter, QStringLiteral("OK"));
++    if (src->format->format == SDL_PIXELFORMAT_ARGB8888 && !SDL_MUSTLOCK(src)) {
++        return src;
 +    }
++    SDL_Surface* converted = SDL_ConvertSurfaceFormat(src, SDL_PIXELFORMAT_ARGB8888, 0);
++    if (converted == nullptr) {
++        return src;
++    }
++    SDL_FreeSurface(src);
++    return converted;
++}
 +
-+    void keyPressEvent(QKeyEvent* event) override
-+    {
-+        switch (event->key()) {
-+        case Qt::Key_Escape:
-+        case Qt::Key_Return:
-+        case Qt::Key_Enter:
-+        case Qt::Key_Space:
-+            close();
-+            break;
-+        default:
-+            break;
++void fillRect(SDL_Surface* dest, const SDL_Rect& rect, SDL_Color color)
++{
++    SDL_Rect clipped = rect;
++    SDL_FillRect(dest, &clipped, SDL_MapRGBA(dest->format, color.r, color.g, color.b, color.a));
++}
++
++TTF_Font* openJetBrainsMono(int pixelSize)
++{
++    static QByteArray fontData;
++    if (fontData.isEmpty()) {
++        QFile file(QStringLiteral(":/res/eclipse/JetBrainsMono-Regular.ttf"));
++        if (file.open(QIODevice::ReadOnly)) {
++            fontData = file.readAll();
 +        }
 +    }
++    if (fontData.isEmpty() || TTF_WasInit() == 0) {
++        return nullptr;
++    }
++    return TTF_OpenFontRW(SDL_RWFromConstMem(fontData.constData(), fontData.size()), 1, pixelSize);
++}
 +
-+    void mouseReleaseEvent(QMouseEvent* event) override
-+    {
-+        if (m_ok.contains(event->position().toPoint())) {
-+            close();
++bool isHeadingLine(const QString& line)
++{
++    const QString trimmed = line.trimmed();
++    return trimmed == QLatin1String("HOST DISPLAYS") ||
++           trimmed == QLatin1String("THIS WINDOW");
++}
++
++SDL_Surface* renderEclipseDisplayCard(const QString& text, SDL_Rect* okOut)
++{
++    const int fontPx = 14;
++    const int padX = 20;
++    const int padTop = 18;
++    const int padBot = 16;
++    const int btnW = 64;
++    const int btnH = 32;
++    const int btnGap = 16;
++    const int wrapW = 480;
++    const int minPanelW = 340;
++    const int maxPanelW = 520;
++
++    TTF_Font* font = openJetBrainsMono(fontPx);
++    if (font == nullptr) {
++        return nullptr;
++    }
++
++    const int lineSkip = TTF_FontLineSkip(font);
++    QList<SDL_Surface*> lines;
++    int textW = 0;
++    int textH = 0;
++    for (const QString& line : text.split(QLatin1Char('\n'))) {
++        if (line.isEmpty()) {
++            lines.append(nullptr);
++            textH += lineSkip;
++            continue;
++        }
++        const SDL_Color color = isHeadingLine(line) ? kGold : kLavender;
++        const QByteArray utf8 = line.toUtf8();
++        SDL_Surface* glyph = toArgb8888(
++            TTF_RenderUTF8_Blended_Wrapped(font, utf8.constData(), color, wrapW));
++        lines.append(glyph);
++        if (glyph != nullptr) {
++            textW = qMax(textW, glyph->w);
++            textH += glyph->h;
++        }
++        else {
++            textH += lineSkip;
 +        }
 +    }
 +
-+private:
-+    QString m_text;
-+    QRect m_ok;
-+};
++    const int panelW = qBound(minPanelW, textW + padX * 2, maxPanelW);
++    const int panelH = padTop + textH + btnGap + btnH + padBot;
++    SDL_Surface* card = SDL_CreateRGBSurfaceWithFormat(0, panelW, panelH, 32, SDL_PIXELFORMAT_ARGB8888);
++    if (card == nullptr) {
++        for (SDL_Surface* glyph : lines) {
++            SDL_FreeSurface(glyph);
++        }
++        TTF_CloseFont(font);
++        return nullptr;
++    }
++
++    SDL_SetSurfaceBlendMode(card, SDL_BLENDMODE_NONE);
++    fillRect(card, {0, 0, panelW, panelH}, kGold);
++    fillRect(card, {1, 1, panelW - 2, panelH - 2}, kNavy);
++
++    int y = padTop;
++    for (SDL_Surface* glyph : lines) {
++        if (glyph == nullptr) {
++            y += lineSkip;
++            continue;
++        }
++        SDL_Rect dst{padX, y, glyph->w, glyph->h};
++        SDL_BlitSurface(glyph, nullptr, card, &dst);
++        y += glyph->h;
++        SDL_FreeSurface(glyph);
++    }
++
++    const SDL_Rect okRect{panelW - padX - btnW, panelH - padBot - btnH, btnW, btnH};
++    fillRect(card, okRect, kLavender);
++    SDL_Surface* okGlyph = toArgb8888(TTF_RenderUTF8_Blended(font, "OK", kNavy));
++    if (okGlyph != nullptr) {
++        SDL_Rect okDst{
++            okRect.x + (okRect.w - okGlyph->w) / 2,
++            okRect.y + (okRect.h - okGlyph->h) / 2,
++            okGlyph->w,
++            okGlyph->h};
++        SDL_BlitSurface(okGlyph, nullptr, card, &okDst);
++        SDL_FreeSurface(okGlyph);
++    }
++    TTF_CloseFont(font);
++
++    if (okOut != nullptr) {
++        *okOut = okRect;
++    }
++    return toArgb8888(card);
++}
++
++// --- Overlay lifetime (SDL surface on OverlayStatusUpdate) ---
 +
 +class EclipseUiListener : public QThread
 +{
@@ -541,14 +791,9 @@ index 00000000..ebaf3b85
 +            return;
 +        }
 +        const quint16 port = server.serverPort();
-+#ifdef Q_OS_WIN32
-+        const unsigned pid = static_cast<unsigned>(_getpid());
-+#else
-+        const unsigned pid = static_cast<unsigned>(getpid());
-+#endif
 +        const QByteArray registerCmd =
-+            QByteArray("register-ui ") + QByteArray::number(port) + ' ' + QByteArray::number(pid);
-+        eclipseSend(registerCmd.constData());
++            QByteArray("register-ui ") + QByteArray::number(port) + ' ' + QByteArray::number(eclipsePid());
++        nativeEclipseSend(registerCmd.constData(), 400);
 +
 +        while (!isInterruptionRequested()) {
 +            if (!server.waitForNewConnection(250)) {
@@ -567,6 +812,11 @@ index 00000000..ebaf3b85
 +            if (payload.isEmpty()) {
 +                continue;
 +            }
++            const QByteArray trimmed = payload.trimmed();
++            if (trimmed.startsWith("hotkey-shift")) {
++                applyHotkeyShift(trimmed.contains('1'));
++                continue;
++            }
 +            SDL_Event event = {};
 +            event.type = SDL_USEREVENT;
 +            event.user.code = SDL_CODE_ECLIPSE_DISPLAY_MAP;
@@ -579,12 +829,88 @@ index 00000000..ebaf3b85
 +};
 +
 +EclipseUiListener* g_listener = nullptr;
++quint32 g_overlayUntil = 0;
 +quint32 g_lastPopupTicks = 0;
++int g_overlayW = 0;
++int g_overlayH = 0;
++SDL_Rect g_okRect = {};
++SDL_Window* g_overlayWindow = nullptr;
++
++void hideDisplayMapOverlay()
++{
++    g_overlayUntil = 0;
++    g_overlayW = 0;
++    g_overlayH = 0;
++    g_okRect = {};
++    g_overlayWindow = nullptr;
++    Session* session = Session::get();
++    if (!session) {
++        return;
++    }
++    session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, nullptr);
++}
++
++bool overlayPointInRect(int x, int y, const SDL_Rect& rect)
++{
++    const SDL_Point point{x, y};
++    return SDL_PointInRect(&point, &rect) == SDL_TRUE;
++}
++
++bool overlayWindowRects(SDL_Rect* panelOut, SDL_Rect* okOut)
++{
++    if (g_overlayWindow == nullptr || g_overlayH <= 0) {
++        return false;
++    }
++    int width = 0;
++    int height = 0;
++    SDL_GetWindowSize(g_overlayWindow, &width, &height);
++    const SDL_Rect panel{0, height - g_overlayH, g_overlayW, g_overlayH};
++    if (panelOut != nullptr) {
++        *panelOut = panel;
++    }
++    if (okOut != nullptr) {
++        *okOut = SDL_Rect{
++            panel.x + g_okRect.x,
++            panel.y + g_okRect.y,
++            g_okRect.w,
++            g_okRect.h};
++    }
++    return true;
++}
 +
 +} // namespace
 +
++QByteArray eclipseControl(const char* command, int readyMs)
++{
++    return nativeEclipseSend(command, readyMs);
++}
++
++bool eclipseIsHotkeyChord(const SDL_KeyboardEvent* event)
++{
++    if (!event) {
++        return false;
++    }
++    const Uint16 mod = event->keysym.mod;
++    if (!(mod & KMOD_CTRL) || !(mod & KMOD_ALT) || (mod & KMOD_GUI)) {
++        return false;
++    }
++    const bool shift = (mod & KMOD_SHIFT) != 0;
++    return shift == hotkeyNeedsShift();
++}
++
++void eclipseSetHotkeyShift(bool shift)
++{
++    applyHotkeyShift(shift);
++}
++
++QString eclipseDisplayName()
++{
++    return qEnvironmentVariable("ECLIPSE_DISPLAY_NAME");
++}
++
 +void eclipseStartUiListener()
 +{
++    eclipseSetHotkeyShift(hotkeyShiftFromEnv());
 +    eclipseStopUiListener();
 +    g_listener = new EclipseUiListener();
 +    g_listener->start();
@@ -592,6 +918,7 @@ index 00000000..ebaf3b85
 +
 +void eclipseStopUiListener()
 +{
++    hideDisplayMapOverlay();
 +    if (!g_listener) {
 +        return;
 +    }
@@ -601,25 +928,99 @@ index 00000000..ebaf3b85
 +    g_listener = nullptr;
 +}
 +
++void eclipsePollDisplayMapOverlay()
++{
++    if (g_overlayUntil != 0 && SDL_TICKS_PASSED(SDL_GetTicks(), g_overlayUntil)) {
++        hideDisplayMapOverlay();
++    }
++}
++
++bool eclipseOverlayHandlesKey(const SDL_KeyboardEvent* event)
++{
++    if (!event || g_overlayUntil == 0 || event->state != SDL_PRESSED || event->repeat) {
++        return false;
++    }
++    switch (event->keysym.sym) {
++    case SDLK_ESCAPE:
++    case SDLK_RETURN:
++    case SDLK_KP_ENTER:
++    case SDLK_SPACE:
++        if (event->keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT | KMOD_GUI)) {
++            return false;
++        }
++        hideDisplayMapOverlay();
++        return true;
++    default:
++        return false;
++    }
++}
++
++bool eclipseOverlayIsVisible()
++{
++    return g_overlayUntil != 0;
++}
++
++bool eclipseOverlayHandlesMouse(const SDL_MouseButtonEvent* event)
++{
++    if (!event || g_overlayUntil == 0) {
++        return false;
++    }
++    if (event->state == SDL_PRESSED && event->button == SDL_BUTTON_LEFT) {
++        SDL_Rect panel{};
++        SDL_Rect ok{};
++        if (!overlayWindowRects(&panel, &ok) ||
++            overlayPointInRect(event->x, event->y, ok) ||
++            !overlayPointInRect(event->x, event->y, panel)) {
++            hideDisplayMapOverlay();
++        }
++    }
++    return true;
++}
++
++bool eclipseHandleDisplayHotkey(const SDL_KeyboardEvent* event)
++{
++    if (!event || event->state != SDL_PRESSED || event->repeat) {
++        return false;
++    }
++    const bool ctrlAlt = eclipseIsHotkeyChord(event);
++    if (!ctrlAlt) {
++        return false;
++    }
++    if (event->keysym.sym == SDLK_0) {
++        eclipseControl("open-all", 2000);
++        return true;
++    }
++    if (event->keysym.sym == SDLK_MINUS ||
++        event->keysym.sym == SDLK_KP_MINUS ||
++        event->keysym.scancode == SDL_SCANCODE_MINUS) {
++        eclipseRequestShowDisplays();
++        return true;
++    }
++    if (event->keysym.sym >= SDLK_1 && event->keysym.sym <= SDLK_9) {
++        char buf[48];
++        snprintf(buf, sizeof(buf), "switch-display %d %u",
++                 static_cast<int>(event->keysym.sym - SDLK_0), eclipsePid());
++        eclipseControl(buf, 2000);
++        return true;
++    }
++    return false;
++}
++
 +void eclipseRequestShowDisplays()
 +{
 +    Session* session = Session::get();
 +    if (!session) {
 +        return;
 +    }
-+    const QByteArray reply = eclipseSend("show-displays", 800);
-+    QString body = QString::fromUtf8(reply);
-+    if (body.startsWith(QLatin1String("ok"))) {
-+        const int nl = body.indexOf('\n');
-+        body = nl >= 0 ? body.mid(nl + 1) : QString();
++    if (g_overlayUntil != 0) {
++        hideDisplayMapOverlay();
++        return;
 +    }
-+    else if (body.startsWith(QLatin1String("err"))) {
-+        body.clear();
-+    }
++    const QString body = parseShowDisplaysReply(nativeEclipseSend("show-displays", 1500));
 +    eclipseShowDisplayMapPopup(session->m_Window,
-+                               body.trimmed(),
++                               body,
 +                               session->m_Preferences->hostDisplayIndex,
-+                               qEnvironmentVariable("ECLIPSE_DISPLAY_NAME"));
++                               eclipseDisplayName());
 +}
 +
 +void eclipseShowDisplayMapPopup(SDL_Window* window,
@@ -634,42 +1035,48 @@ index 00000000..ebaf3b85
 +    g_lastPopupTicks = now;
 +
 +    Session* session = Session::get();
-+    SdlInputHandler* input = session ? session->m_InputHandler : nullptr;
-+    const bool recapture = input && input->isCaptureActive();
-+    if (input) {
-+        input->raiseAllKeys();
-+        input->setCaptureActive(false);
++    if (!session) {
++        return;
++    }
++    if (window == nullptr) {
++        window = session->m_Window;
 +    }
 +
-+    const QString text = buildPopupText(hostList, activeIndex, activeName);
-+    EclipseDisplayPopup popup(text, window);
-+    popup.show();
-+    popup.raise();
-+    popup.requestActivate();
-+    popup.setKeyboardGrabEnabled(true);
-+
-+    QEventLoop loop;
-+    QObject::connect(&popup, &QWindow::visibleChanged, &loop, [&]() {
-+        if (!popup.isVisible()) {
-+            loop.quit();
-+        }
-+    });
-+    loop.exec();
-+
-+    if (input && recapture) {
-+        input->setCaptureActive(true);
++    const QString map = resolveDisplayMap(hostList, session->m_Preferences->eclipseDisplayMap);
++    const QString body = buildPopupText(map, activeIndex, activeName);
++    SDL_Rect okRect{};
++    SDL_Surface* card = renderEclipseDisplayCard(body, &okRect);
++    if (card != nullptr) {
++        g_overlayW = card->w;
++        g_overlayH = card->h;
++        g_okRect = okRect;
++        g_overlayWindow = window;
++        session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, card);
 +    }
++    else {
++        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
++                    "Eclipse display overlay failed to render; using status text");
++        const QByteArray utf8 = body.toUtf8();
++        session->getOverlayManager().updateOverlayText(Overlay::OverlayStatusUpdate, utf8.constData());
++        session->getOverlayManager().setOverlayState(Overlay::OverlayStatusUpdate, true);
++        g_overlayW = 0;
++        g_overlayH = 0;
++        g_okRect = {};
++        g_overlayWindow = window;
++    }
++    g_overlayUntil = now + kOverlayMs;
 +}
 diff --git a/app/streaming/eclipsepopup.h b/app/streaming/eclipsepopup.h
 new file mode 100644
-index 00000000..6783932c
+index 00000000..9cfe674e
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,106 @@
 +#pragma once
 +
 +#include "SDL_compat.h"
 +
++#include <QByteArray>
 +#include <QString>
 +
 +#define SDL_CODE_ECLIPSE_DISPLAY_MAP 106
@@ -685,15 +1092,85 @@ index 00000000..6783932c
 +void eclipseStopUiListener();
 +
 +/**
++ * @brief Send a one-line command to the Eclipse control socket.
++ *
++ * @param command Command without a trailing newline.
++ * @param readyMs How long to wait for a reply.
++ * @return Reply bytes, which may be empty on failure.
++ */
++QByteArray eclipseControl(const char* command, int readyMs = 400);
++
++/**
++ * @brief Whether this key matches the current Eclipse shortcut chord.
++ *
++ * Ctrl+Alt, or Ctrl+Alt+Shift when `ECLIPSE_HOTKEY_SHIFT` is set. Super is
++ * never part of the chord.
++ */
++bool eclipseIsHotkeyChord(const SDL_KeyboardEvent* event);
++
++/**
++ * @brief Apply a live shortcut-chord change from Eclipse (`hotkey-shift 0|1`).
++ */
++void eclipseSetHotkeyShift(bool shift);
++
++/**
++ * @brief Host display name for this window (`ECLIPSE_DISPLAY_NAME`).
++ */
++QString eclipseDisplayName();
++
++/**
 + * @brief Ask Eclipse for the host display map and show it on this window.
 + */
 +void eclipseRequestShowDisplays();
 +
 +/**
-+ * @brief Show the host-display popup over the stream window.
++ * @brief Consume Ctrl+Alt(+Shift)+0 / - / 1–9 (open-all, overlay, switch-display).
 + *
-+ * @param window SDL stream window used to center the popup.
-+ * @param hostList Tab-separated lines of index, shortcut, and display name.
++ * Esc, F, K, and Q stay in the SDL input handler so they can use
++ * `performSpecialKeyCombo`.
++ *
++ * @param event SDL keyboard event.
++ * @return true when the key should not be sent to the host.
++ */
++bool eclipseHandleDisplayHotkey(const SDL_KeyboardEvent* event);
++
++/**
++ * @brief Dismiss the in-stream display map overlay if it is past its timeout.
++ */
++void eclipsePollDisplayMapOverlay();
++
++/**
++ * @brief Consume Esc/Enter/Space while the display map overlay is visible.
++ *
++ * @param event SDL keyboard event.
++ * @return true when the key should not be sent to the host.
++ */
++bool eclipseOverlayHandlesKey(const SDL_KeyboardEvent* event);
++
++/**
++ * @brief Whether the in-stream display map overlay is currently shown.
++ */
++bool eclipseOverlayIsVisible();
++
++/**
++ * @brief Consume mouse clicks on the display map overlay (OK / dismiss).
++ *
++ * @param event SDL mouse button event.
++ * @return true when the click should not be sent to the host.
++ */
++bool eclipseOverlayHandlesMouse(const SDL_MouseButtonEvent* event);
++
++/**
++ * @brief Show the host-display map as an SDL overlay on the stream window.
++ *
++ * A Qt dialog is a second Wayland toplevel and blocks the SDL loop, so
++ * compositors report the stream window as not responding. The overlay is
++ * painted in Eclipse chrome (navy card, gold border, JetBrains Mono) onto
++ * an SDL surface so it stays on the video path.
++ *
++ * @param window Stream window; used for overlay hit-testing.
++ * @param hostList Map rows of `index;shortcut;name`, joined by `|`.
++ *                 Newlines and tabs are still accepted from older payloads.
 + * @param activeIndex 0-based host display index for this window.
 + * @param activeName Host display name for this window.
 + */
@@ -702,109 +1179,46 @@ index 00000000..6783932c
 +                                int activeIndex,
 +                                const QString& activeName);
 diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
-index b195f73b..be3844a1 100644
+index b195f73b..4f636489 100644
 --- a/app/streaming/input/keyboard.cpp
 +++ b/app/streaming/input/keyboard.cpp
-@@ -1,8 +1,18 @@
+@@ -1,4 +1,5 @@
  #include "streaming/session.h"
 +#include "streaming/eclipsepopup.h"
  
  #include <Limelight.h>
  #include "SDL_compat.h"
- 
-+#include <QTcpSocket>
-+#include <cstdio>
-+
-+#ifdef Q_OS_WIN32
-+#include <process.h>
-+#else
-+#include <unistd.h>
-+#endif
-+
- #define VK_0 0x30
- #define VK_A 0x41
- 
-@@ -13,6 +23,33 @@
- #define VK_NUMPAD0 0x60
- #endif
- 
-+static void eclipseControl(const char *command)
-+{
-+    const QByteArray dest = qgetenv("ECLIPSE_CONTROL");
-+    if (dest.isEmpty()) {
-+        return;
-+    }
-+    const QList<QByteArray> parts = dest.split(':');
-+    if (parts.size() != 2) {
-+        return;
-+    }
-+    bool ok = false;
-+    const quint16 port = parts.at(1).toUShort(&ok);
-+    if (!ok || port == 0) {
-+        return;
-+    }
-+    QTcpSocket sock;
-+    sock.connectToHost(QString::fromUtf8(parts.at(0)), port);
-+    if (!sock.waitForConnected(400)) {
-+        return;
-+    }
-+    sock.write(QByteArray(command) + '\n');
-+    sock.flush();
-+    sock.waitForBytesWritten(400);
-+    sock.waitForReadyRead(400);
-+    sock.disconnectFromHost();
-+}
-+
- void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
- {
-     switch (combo) {
-@@ -185,6 +222,52 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+@@ -185,6 +186,36 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
          return;
      }
  
-+    // Eclipse: Ctrl+Alt shortcuts (no Shift — that is Sunshine's display switch).
-+    // Consumed locally so they never reach the host.
-+    if (event->state == SDL_PRESSED) {
-+        const bool ctrlAlt =
-+            (event->keysym.mod & KMOD_CTRL) &&
-+            (event->keysym.mod & KMOD_ALT) &&
-+            !(event->keysym.mod & (KMOD_SHIFT | KMOD_GUI));
-+        if (ctrlAlt) {
-+            if (event->keysym.sym == SDLK_ESCAPE) {
-+                eclipseControl("disconnect-all");
-+                performSpecialKeyCombo(KeyComboQuit);
-+                return;
-+            }
-+            if (event->keysym.sym == SDLK_f) {
-+                performSpecialKeyCombo(KeyComboToggleFullScreen);
-+                return;
-+            }
-+            if (event->keysym.sym == SDLK_q) {
-+                performSpecialKeyCombo(KeyComboQuit);
-+                return;
-+            }
-+            if (event->keysym.sym == SDLK_0) {
-+                eclipseControl("open-all");
-+                return;
-+            }
-+            if (event->keysym.sym == SDLK_MINUS ||
-+                event->keysym.sym == SDLK_KP_MINUS ||
-+                event->keysym.scancode == SDL_SCANCODE_MINUS) {
-+                eclipseRequestShowDisplays();
-+                return;
-+            }
-+            if (event->keysym.sym >= SDLK_1 && event->keysym.sym <= SDLK_9) {
-+                char buf[48];
-+#ifdef Q_OS_WIN32
-+                const unsigned pid = static_cast<unsigned>(_getpid());
-+#else
-+                const unsigned pid = static_cast<unsigned>(getpid());
-+#endif
-+                snprintf(buf, sizeof(buf), "switch-display %d %u",
-+                         static_cast<int>(event->keysym.sym - SDLK_0), pid);
-+                eclipseControl(buf);
-+                return;
-+            }
++    if (eclipseOverlayHandlesKey(event)) {
++        return;
++    }
++    if (eclipseHandleDisplayHotkey(event)) {
++        return;
++    }
++
++    // Eclipse: Ctrl+Alt shortcuts (Shift is optional via ECLIPSE_HOTKEY_SHIFT).
++    // Consumed locally so they never reach the host. Display 0/-/1–9 are in
++    // eclipseHandleDisplayHotkey; Esc/F/K/Q need performSpecialKeyCombo.
++    if (event->state == SDL_PRESSED && eclipseIsHotkeyChord(event)) {
++        if (event->keysym.sym == SDLK_ESCAPE) {
++            eclipseControl("disconnect-all");
++            performSpecialKeyCombo(KeyComboQuit);
++            return;
++        }
++        if (event->keysym.sym == SDLK_f) {
++            performSpecialKeyCombo(KeyComboToggleFullScreen);
++            return;
++        }
++        if (event->keysym.sym == SDLK_k) {
++            performSpecialKeyCombo(KeyComboToggleKeyboardGrab);
++            return;
++        }
++        if (event->keysym.sym == SDLK_q) {
++            performSpecialKeyCombo(KeyComboQuit);
++            return;
 +        }
 +    }
 +
@@ -812,7 +1226,7 @@ index b195f73b..be3844a1 100644
      if ((event->state == SDL_PRESSED) &&
              (event->keysym.mod & KMOD_CTRL) &&
 diff --git a/app/streaming/session.cpp b/app/streaming/session.cpp
-index 40c1e59c..fe3c0eac 100644
+index 40c1e59c..78b8088c 100644
 --- a/app/streaming/session.cpp
 +++ b/app/streaming/session.cpp
 @@ -1,6 +1,7 @@
@@ -948,7 +1362,7 @@ index 40c1e59c..fe3c0eac 100644
      // We use only the computer name on macOS to match Apple conventions where the
      // app name is featured in the menu bar and the document name is in the title bar.
 +    QString title = m_Computer->name;
-+    const QString eclipseDisplay = qEnvironmentVariable("ECLIPSE_DISPLAY_NAME");
++    const QString eclipseDisplay = eclipseDisplayName();
 +    if (!eclipseDisplay.isEmpty()) {
 +        title = QString("%1 — %2").arg(title, eclipseDisplay);
 +    }
@@ -981,7 +1395,26 @@ index 40c1e59c..fe3c0eac 100644
      // Hijack this thread to be the SDL main thread. We have to do this
      // because we want to suspend all Qt processing until the stream is over.
      SDL_Event event;
-@@ -2036,6 +2060,17 @@ void Session::exec()
+@@ -1976,8 +2000,10 @@ void Session::exec()
+         // and other problems.
+         if (!SDL_WaitEventTimeout(&event, 1000)) {
+             presence.runCallbacks();
++            eclipsePollDisplayMapOverlay();
+             continue;
+         }
++        eclipsePollDisplayMapOverlay();
+ #else
+         // We explicitly use SDL_PollEvent() and SDL_Delay() because
+         // SDL_WaitEvent() has an internal SDL_Delay(10) inside which
+@@ -1992,6 +2018,7 @@ void Session::exec()
+             SDL_Delay(10);
+ #endif
+             presence.runCallbacks();
++            eclipsePollDisplayMapOverlay();
+             continue;
+         }
+ #endif
+@@ -2036,6 +2063,17 @@ void Session::exec()
                  m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                      (DualSenseOutputReport *)event.user.data2);
                  break;
@@ -993,13 +1426,35 @@ index 40c1e59c..fe3c0eac 100644
 +                eclipseShowDisplayMapPopup(m_Window,
 +                                           hostList.trimmed(),
 +                                           m_Preferences->hostDisplayIndex,
-+                                           qEnvironmentVariable("ECLIPSE_DISPLAY_NAME"));
++                                           eclipseDisplayName());
 +                break;
 +            }
              default:
                  SDL_assert(false);
              }
-@@ -2308,6 +2343,8 @@ void Session::exec()
+@@ -2253,12 +2291,21 @@ void Session::exec()
+         case SDL_MOUSEBUTTONDOWN:
+         case SDL_MOUSEBUTTONUP:
+             presence.runCallbacks();
++            if (eclipseOverlayHandlesMouse(&event.button)) {
++                break;
++            }
+             m_InputHandler->handleMouseButtonEvent(&event.button);
+             break;
+         case SDL_MOUSEMOTION:
++            if (eclipseOverlayIsVisible()) {
++                break;
++            }
+             m_InputHandler->handleMouseMotionEvent(&event.motion);
+             break;
+         case SDL_MOUSEWHEEL:
++            if (eclipseOverlayIsVisible()) {
++                break;
++            }
+             m_InputHandler->handleMouseWheelEvent(&event.wheel);
+             break;
+         case SDL_CONTROLLERAXISMOTION:
+@@ -2308,6 +2355,8 @@ void Session::exec()
      }
  
  DispatchDeferredCleanup:
@@ -1040,3 +1495,48 @@ index 9bd32f50..c0185648 100644
      int dstH = SDL_ceilf((float)dst->w * src->h / src->w);
      int dstW = SDL_ceilf((float)dst->h * src->w / src->h);
  
+diff --git a/app/streaming/video/overlaymanager.cpp b/app/streaming/video/overlaymanager.cpp
+index ab1da16c..eb680021 100644
+--- a/app/streaming/video/overlaymanager.cpp
++++ b/app/streaming/video/overlaymanager.cpp
+@@ -106,6 +106,26 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
+     }
+ }
+ 
++void OverlayManager::setOverlaySurface(OverlayType type, SDL_Surface* surface)
++{
++    m_Overlays[type].enabled = surface != nullptr;
++    if (surface == nullptr) {
++        m_Overlays[type].text[0] = 0;
++    }
++
++    SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
++        (void**)&m_Overlays[type].surface,
++        surface);
++
++    if (m_Renderer != nullptr) {
++        m_Renderer->notifyOverlayUpdated(type);
++    }
++
++    if (oldSurface != nullptr) {
++        SDL_FreeSurface(oldSurface);
++    }
++}
++
+ SDL_Color OverlayManager::getOverlayColor(OverlayType type)
+ {
+     return m_Overlays[type].color;
+diff --git a/app/streaming/video/overlaymanager.h b/app/streaming/video/overlaymanager.h
+index 8f8a60b3..e0902f83 100644
+--- a/app/streaming/video/overlaymanager.h
++++ b/app/streaming/video/overlaymanager.h
+@@ -33,6 +33,9 @@ public:
+     int getOverlayMaxTextLength();
+     void setOverlayTextUpdated(OverlayType type);
+     void setOverlayState(OverlayType type, bool enabled);
++    // Install a pre-rendered ARGB8888 surface (caller transfers ownership).
++    // nullptr disables the overlay without going through the TTF status path.
++    void setOverlaySurface(OverlayType type, SDL_Surface* surface);
+     SDL_Color getOverlayColor(OverlayType type);
+     int getOverlayFontSize(OverlayType type);
+     SDL_Surface* getUpdatedOverlaySurface(OverlayType type);

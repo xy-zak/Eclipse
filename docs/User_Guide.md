@@ -10,11 +10,11 @@ There are **no published GitHub Releases yet**. You can build a native package o
 - After you log in, an **Eclipse tray icon** appears. **Host streaming** is on by default; uncheck it to pause the host without uninstalling. While it is on, other machines on your Tailscale network can control this desktop. The icon stays so you can turn it back on. A reboot turns the host on again. Sunshine’s own tray is off; only this Eclipse tray is used.
 - While Host streaming is on, the PC will **not idle-sleep** (timeout). Closing the lid or pressing the power button still sleeps the machine; it is then unreachable until it wakes. After wake, the host service restarts so capture and the network recover.
 - Desktop idle daemons (Hyprland `hypridle`, GNOME auto-suspend) often call `systemctl suspend` on a timer. That is the same path as lid-close, so Eclipse cannot block it without also blocking the lid. Turn that timer off if you want timeout-proof hosting.
-- Closing the Eclipse window hides it to the tray. **Quit Eclipse** in the tray menu exits the app and leaves the packaged host service running (or stopped, if you toggled it off).
-- Opening Eclipse shows whether the Sunshine and Moonlight binaries are present and whether the host process answers on `:47990`.
+- Closing the Eclipse window hides it to the tray. **Quit Eclipse** in the tray menu exits the app. Sunshine stays running after quit if **Keep Sunshine Host running in background** is on (the packaged default); **Stop Sunshine Host when Eclipse closes** stops the host on quit.
+- Opening Eclipse shows Sunshine and Moonlight next to Tailscale on the **CLIENT** card, and whether the host process answers on `:47990`.
 - If Tailscale is installed and logged in, **Peers** lists other machines on the tailnet and whether Sunshine answers on port `47990`.
 - **Connect** on a peer with Eclipse host online pairs (if needed) and opens a Moonlight window on Desktop.
-- Sunshine's own web UI is at [https://localhost:47990](https://localhost:47990) (self-signed certificate; the browser warning is expected). Username is `eclipse`. From the CLIENT panel use **Open host admin** and **Copy Web UI password**. Connect does not use this password.
+- Sunshine's own web UI is at [https://localhost:47990](https://localhost:47990) (self-signed certificate; the browser warning is expected). Username is `eclipse`. Open the sun icon next to **CLIENT** for **Open host admin control panel**, **Copy host admin password**, and whether Sunshine stays running after **Quit Eclipse**. Connect does not use this password.
 
 ## What is not built yet
 
@@ -155,18 +155,19 @@ First run can take a long time: Visual Studio Build Tools, Qt 6, and (on NVIDIA 
 
 1. After a **package** install, Sunshine is already running. After login, the Eclipse tray starts in the background (`eclipse --tray`).
 2. Left-click the tray (or **Open Eclipse**) for the dashboard. The window close button hides to the tray.
-3. Right-click the tray: **Host streaming** pauses or resumes the host service. **Quit Eclipse** exits the tray app; it does not uninstall the boot service.
+3. Right-click the tray: **Host streaming** pauses or resumes the host service. The sun icon on **CLIENT** does the same, and can leave the host running after **Quit Eclipse** or stop it when you quit. **Quit Eclipse** exits the tray app; it does not uninstall the boot service.
 4. From source, `npm run tauri -- dev` shows the window and tray. Host streaming toggles the Sunshine child.
 5. Optional: open [https://localhost:47990](https://localhost:47990) to finish Sunshine's first-run username/password if prompted.
 
-**Connect** on a peer row starts pairing if needed, then opens a Moonlight window on the host Desktop. Open the cog next to **HOSTS** for stream settings (left is lower quality, right is higher): codec (H.264, HEVC, or AV1), scale (Quarter / Half / Native of the host monitor), 30 or 60 fps, and a 10 / 20 / 50 Mb/s cap. Defaults are H.264, Native, 60 fps, and 20 Mb/s. The scale picker shows the resulting encode size for each known host display; the host desktop mode does not change. Choices are saved and used on the next Connect; if you are already streaming, Eclipse respawns the Moonlight window. The **!** next to **CLIENT** lists in-stream shortcuts. Disconnect from the dashboard, or use the last window / Ctrl+Alt+Esc. **CLIENT** **Status** is Idle, currently controlling a host, or currently streaming to a client (Connect is disabled until you **Force disconnect from streaming client**). Linux input injection still needs the `input` group.
+**Connect** on a peer row starts pairing if needed, then opens a Moonlight window on the host Desktop. Open the cog next to **HOSTS** for stream settings (left is lower quality, right is higher): codec (H.264, HEVC, or AV1), scale (Quarter / Half / Native of the host monitor), 30 or 60 fps, and a 10 / 20 / 50 Mb/s cap. Defaults are H.264, Native, 60 fps, and 20 Mb/s. Scale is relative to the host monitor; the host desktop mode does not change. Choices are saved and used on the next Connect; if you are already streaming, Eclipse respawns the Moonlight window. **CLIENT** menus (left to right) are Moonlight, Sunshine, Tailscale, and shortcuts. The command icon lists in-stream keys and can switch them between Ctrl+Alt and Ctrl+Alt+Shift. The Tailscale icon explains discovery and links to [Tailscale downloads](https://tailscale.com/download). Disconnect from the dashboard, or use the last window / Ctrl+Alt+Esc. **CLIENT** **Status** is Idle, currently controlling a host, or currently streaming to a client (Connect is disabled until you **Force disconnect from streaming client**). Linux input injection still needs the `input` group.
 
-While a Moonlight window is focused:
+While a Moonlight window is focused (chord is Ctrl+Alt by default; switch to Ctrl+Alt+Shift from the Client Commands dropdown):
 
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+Alt+Esc | Close every window and disconnect |
 | Ctrl+Alt+F | Fullscreen this window (letterboxed, no stretched pixels) |
+| Ctrl+Alt+K | Super / Windows key: client (local) or host (remote) |
 | Ctrl+Alt+- | List host displays (every open stream window) |
 | Ctrl+Alt+1–9 | Switch this window to host display N |
 | Ctrl+Alt+0 | One client window per host display |
@@ -204,6 +205,6 @@ On Hyprland / Omarchy, the tray appears only if the bar has a tray module (for e
 | Linux: `Couldn't import RGB Image: 00003009` | EGL DMA-BUF import failed on `wlr`. Rebuild sidecars so `patches/sunshine-egl-bad-match.patch` is applied. Do not force KMS unless `wlr` still fails. |
 | Two copies of Sunshine | Uninstall distro Sunshine / close the other Eclipse window. GameStream RTSP is port `48010`; the Web UI is `47990`. Both must be the same process. |
 | Connect asks to trust a changed host certificate | Expected after a full reinstall of Eclipse on that host PC. Choose **Trust this Host**. App updates do not change the cert. |
-| Cannot log into https://localhost:47990 | Username is `eclipse`. Use **Copy Web UI password** on the CLIENT panel. The same secret is in `/etc/eclipse/sunshine/web-ui-password` or the install `config\web-ui-password` file (source: next to `sunshine_state.json`). |
+| Cannot log into https://localhost:47990 | Username is `eclipse`. Use **Copy host admin password** under the CLIENT sun icon. The same secret is in `/etc/eclipse/sunshine/web-ui-password` or the install `config\web-ui-password` file (source: next to `sunshine_state.json`). |
 | Video works, input does not (Linux) | Run `./scripts/linux-host-perms.sh`, then log out so the `input` group applies. Confirm `/dev/uinput` is writable. |
 

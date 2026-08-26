@@ -600,12 +600,14 @@ fn child_alive(child: Option<&mut Child>) -> bool {
 /// Holds the host engine child. Moonlight is launched per session (see `session`).
 pub struct HostProcess {
     child: Mutex<Option<Child>>,
+    keep_on_exit: Mutex<bool>,
 }
 
 impl HostProcess {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            keep_on_exit: Mutex::new(load_keep_on_exit()),
         }
     }
 
@@ -704,6 +706,15 @@ impl HostProcess {
         }
         alive || SUNSHINE.probe_health(HOST_HEALTH_TIMEOUT)
     }
+
+    pub fn keep_host_on_exit(&self) -> bool {
+        *self.keep_on_exit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_keep_host_on_exit(&self, on: bool) {
+        *self.keep_on_exit.lock().unwrap_or_else(|e| e.into_inner()) = on;
+        save_keep_on_exit(on);
+    }
 }
 
 fn wait_for(pred: impl Fn() -> bool, timeout: Duration) -> bool {
@@ -717,6 +728,52 @@ fn wait_for(pred: impl Fn() -> bool, timeout: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+fn keep_on_exit_path() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("eclipse").join("host-keep.json");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("eclipse")
+            .join("host-keep.json");
+    }
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("Eclipse").join("host-keep.json");
+        }
+    }
+    std::env::temp_dir().join("eclipse-host-keep.json")
+}
+
+fn load_keep_on_exit() -> bool {
+    load_keep_on_exit_from(&keep_on_exit_path())
+}
+
+fn load_keep_on_exit_from(path: &Path) -> bool {
+    if let Ok(text) = fs::read_to_string(path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(on) = value.get("keepOnExit").and_then(|v| v.as_bool()) {
+                return on;
+            }
+        }
+    }
+    host_service_installed() || packaged_windows_host()
+}
+
+fn save_keep_on_exit(on: bool) {
+    save_keep_on_exit_to(&keep_on_exit_path(), on);
+}
+
+fn save_keep_on_exit_to(path: &Path, on: bool) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let body = serde_json::json!({ "keepOnExit": on });
+    let _ = fs::write(path, body.to_string());
 }
 
 fn sunshine_already_hosted() -> bool {
@@ -998,6 +1055,7 @@ pub struct SidecarStatus {
     pub sunshine_present: bool,
     pub moonlight_present: bool,
     pub sunshine_running: bool,
+    pub keep_host_on_exit: bool,
     pub host_triple: String,
 }
 
@@ -1007,6 +1065,7 @@ impl SidecarStatus {
             sunshine_present: SUNSHINE.is_present(),
             moonlight_present: MOONLIGHT.is_present(),
             sunshine_running: host.sunshine_running(),
+            keep_host_on_exit: host.keep_host_on_exit(),
             host_triple: env!("HOST_TRIPLE").to_string(),
         }
     }
@@ -1160,6 +1219,18 @@ mod tests {
         host.stop_sunshine();
         // No child and (usually) nothing on :47990 in unit tests.
         let _ = host.sunshine_running();
+    }
+
+    #[test]
+    fn keep_on_exit_roundtrips_json() {
+        let dir = unique_temp("eclipse-keep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host-keep.json");
+        save_keep_on_exit_to(&path, true);
+        assert!(load_keep_on_exit_from(&path));
+        save_keep_on_exit_to(&path, false);
+        assert!(!load_keep_on_exit_from(&path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

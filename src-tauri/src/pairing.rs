@@ -11,6 +11,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
 
+use crate::display::{parse_host_identity, DisplayInfo, HostInventory};
 use crate::hostconf::{self, is_allowed_peer_ip};
 use crate::sidecar::{probe_tcp, SUNSHINE};
 
@@ -308,15 +309,15 @@ pub fn ensure_host_video(host: &str) -> Result<(), PinError> {
     Ok(())
 }
 
-/// GET `/api/displays`. Missing endpoint (old Sunshine) yields an empty list.
-pub fn fetch_displays(host: &str) -> Option<Vec<crate::display::DisplayInfo>> {
+/// GET `/api/displays`. Missing endpoint (old Sunshine) yields `None`.
+pub fn fetch_host_inventory(host: &str) -> Option<HostInventory> {
     if !is_allowed_peer_ip(host) {
         return None;
     }
     let client = http_client().ok()?;
     let response = client
         .get(displays_url(host))
-        .timeout(Duration::from_millis(400))
+        .timeout(Duration::from_secs(2))
         .send()
         .ok()?;
     verify_host_cert(host, &response, false).ok()?;
@@ -324,41 +325,12 @@ pub fn fetch_displays(host: &str) -> Option<Vec<crate::display::DisplayInfo>> {
         return None;
     }
     let value: serde_json::Value = response.json().ok()?;
-    Some(parse_displays_payload(&value))
+    Some(parse_host_identity(&value))
 }
 
-pub fn parse_displays_payload(value: &serde_json::Value) -> Vec<crate::display::DisplayInfo> {
-    let Some(arr) = value.get("displays").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (i, item) in arr.iter().enumerate() {
-        let width = item.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let height = item.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        if width == 0 || height == 0 {
-            continue;
-        }
-        let name = item
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let focused = item
-            .get("focused")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(i == 0);
-        out.push(crate::display::DisplayInfo {
-            name: if name.is_empty() {
-                format!("Display {}", i + 1)
-            } else {
-                name
-            },
-            width,
-            height,
-            focused,
-        });
-    }
-    out
+/// GET `/api/displays`. Missing endpoint (old Sunshine) yields an empty list.
+pub fn fetch_displays(host: &str) -> Option<Vec<DisplayInfo>> {
+    fetch_host_inventory(host).map(|h| h.displays)
 }
 
 /// POST `/api/apps/close` so the host Desktop app ends with the last client window.
@@ -463,6 +435,7 @@ mod tests {
     #[test]
     fn fetch_displays_rejects_rfc1918() {
         assert!(fetch_displays("192.168.1.1").is_none());
+        assert!(fetch_host_inventory("192.168.1.1").is_none());
     }
 
     #[test]
@@ -527,25 +500,6 @@ mod tests {
         assert_eq!(normalize_client_ip("::ffff:100.64.0.2"), "100.64.0.2");
         assert_eq!(normalize_client_ip("[::ffff:100.64.0.2]"), "100.64.0.2");
         assert_eq!(normalize_client_ip(" 100.64.0.2 "), "100.64.0.2");
-    }
-
-    #[test]
-    fn parse_displays_payload_skips_zero_size() {
-        let value = serde_json::json!({
-            "status": true,
-            "displays": [
-                {"index": 0, "name": "eDP-1", "width": 2880, "height": 1920, "focused": true},
-                {"index": 1, "name": "HDMI-A-1", "width": 0, "height": 0, "focused": false},
-                {"index": 2, "name": "DP-1", "width": 1920, "height": 1080, "focused": false}
-            ]
-        });
-        let displays = parse_displays_payload(&value);
-        assert_eq!(displays.len(), 2);
-        assert_eq!(displays[0].name, "eDP-1");
-        assert_eq!(displays[0].width, 2880);
-        assert!(displays[0].focused);
-        assert_eq!(displays[1].name, "DP-1");
-        assert!(!displays[1].focused);
     }
 
     #[test]

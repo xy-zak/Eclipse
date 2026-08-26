@@ -143,11 +143,22 @@ case "${family}" in
       echo "Expected src-tauri/target/release/sunshine after tauri --no-bundle." >&2
       exit 1
     fi
+    # Drop prior artifacts so install globs never match multiple pkgver/pkgrel
+    # builds (pacman: "duplicate target" / accidental downgrade).
+    rm -f "${ROOT}/packaging/arch/"eclipse-*.pkg.tar.*
     (cd "${ROOT}/packaging/arch" && makepkg -f --noconfirm)
+    shopt -s nullglob
+    arch_pkgs=("${ROOT}/packaging/arch/"eclipse-*.pkg.tar.*)
+    shopt -u nullglob
+    if [[ "${#arch_pkgs[@]}" -ne 1 ]]; then
+      echo "Expected exactly one Arch package under packaging/arch/, found ${#arch_pkgs[@]}." >&2
+      ls -lh "${ROOT}/packaging/arch/"*.pkg.tar.* 2>/dev/null || true
+      exit 1
+    fi
     echo
     echo "Arch package:"
-    ls -lh "${ROOT}/packaging/arch/"*.pkg.tar.* || ls -lh "${ROOT}/packaging/arch/"
-    echo "Install with: sudo pacman -U packaging/arch/eclipse-*.pkg.tar.zst"
+    ls -lh "${arch_pkgs[0]}"
+    echo "Install with: sudo pacman -U ${arch_pkgs[0]#${ROOT}/}"
     echo "Log out once after install so the input group applies."
     ;;
 esac

@@ -1,7 +1,8 @@
 //! Client session launch: pair if needed, then spawn Moonlight window(s) on Desktop.
 //!
-//! A session is the connection, not a single OS window. Ctrl+Alt+Q closes one
-//! window; the last window (or Ctrl+Alt+Esc) disconnects.
+//! A session is the connection, not a single OS window. Ctrl+Alt+Q (or
+//! Ctrl+Alt+Shift+Q) closes one window; the last window (or Esc on the same
+//! chord) disconnects.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::display::{self, DisplayInfo, ScaleOption};
+use crate::display::{self, DisplayInfo, HostDisplayCache, ScaleOption};
 use crate::pairing::{self, generate_pin};
 use crate::sidecar::MOONLIGHT;
 
@@ -21,6 +22,7 @@ const PAIR_START_GRACE: Duration = Duration::from_millis(400);
 pub const STREAM_FPS: u32 = 60;
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
+const MAX_DISPLAY_WINDOWS: usize = 4;
 const DEFAULT_BITRATE_MBPS: u32 = 20;
 const DEFAULT_CODEC: &str = "H.264";
 
@@ -45,6 +47,7 @@ pub fn stream_args(
     display_index: Option<usize>,
     audio: bool,
     prefs: &StreamPrefs,
+    display_map: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "stream".into(),
@@ -69,6 +72,12 @@ pub fn stream_args(
     }
     if !audio {
         args.push("--mute-on-focus-loss".into());
+    }
+    // Options must come before host/app. QCommandLineParser treats flags after
+    // the positional "Desktop" as extra positionals, so the map would be dropped.
+    if !display_map.is_empty() {
+        args.push("--eclipse-display-map".into());
+        args.push(display_map.to_string());
     }
     args.push(peer_ip.into());
     args.push(DESKTOP_APP.into());
@@ -207,24 +216,6 @@ fn parse_control_line(cmd: &str) -> ControlCmd {
     ControlCmd::Ignore
 }
 
-fn display_shortcut(index: usize) -> String {
-    let key = index + 1;
-    if key <= 9 {
-        format!("Ctrl+Alt+{key}")
-    } else {
-        String::new()
-    }
-}
-
-fn format_display_map(displays: &[DisplayInfo]) -> String {
-    let mut out = String::new();
-    for (i, d) in displays.iter().enumerate() {
-        let name = d.name.replace(['\t', '\n', '\r'], " ");
-        out.push_str(&format!("{i}\t{}\t{name}\n", display_shortcut(i)));
-    }
-    out
-}
-
 fn push_display_map(port: u16, body: &str) {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(150)) {
@@ -242,6 +233,8 @@ pub struct StreamPrefs {
     pub fps: u32,
     pub codec: String,
     pub bitrate_mbps: u32,
+    #[serde(default)]
+    pub hotkey_shift: bool,
 }
 
 impl Default for StreamPrefs {
@@ -251,6 +244,7 @@ impl Default for StreamPrefs {
             fps: STREAM_FPS,
             codec: DEFAULT_CODEC.into(),
             bitrate_mbps: DEFAULT_BITRATE_MBPS,
+            hotkey_shift: false,
         }
     }
 }
@@ -294,6 +288,7 @@ pub struct SessionStatus {
     pub scale: u32,
     pub codec: String,
     pub bitrate_mbps: u32,
+    pub hotkey_shift: bool,
     pub displays: Vec<StreamWindowStatus>,
     pub scale_options: Vec<ScaleOption>,
 }
@@ -309,7 +304,7 @@ struct SessionInner {
     pair: Mutex<Option<PairProc>>,
     windows: Mutex<Vec<StreamChild>>,
     connected_ip: Mutex<Option<String>>,
-    host_displays: Mutex<Vec<DisplayInfo>>,
+    host: Mutex<HostDisplayCache>,
     prefs: Mutex<StreamPrefs>,
     control_port: Mutex<Option<u16>>,
 }
@@ -325,7 +320,7 @@ impl SessionProcess {
             pair: Mutex::new(None),
             windows: Mutex::new(Vec::new()),
             connected_ip: Mutex::new(None),
-            host_displays: Mutex::new(Vec::new()),
+            host: Mutex::new(HostDisplayCache::default()),
             prefs: Mutex::new(load_prefs()),
             control_port: Mutex::new(None),
         });
@@ -349,12 +344,42 @@ impl SessionProcess {
         self.inner.open_all_displays()
     }
 
-    pub fn connect(&self, peer_ip: &str, trust_new_cert: bool) -> Result<(), String> {
-        self.inner.connect(peer_ip, trust_new_cert)
+    pub fn connect(
+        &self,
+        peer_ip: &str,
+        trust_new_cert: bool,
+        known_displays: Vec<DisplayInfo>,
+    ) -> Result<(), String> {
+        self.inner.connect(peer_ip, trust_new_cert, known_displays)
     }
 }
 
 impl SessionInner {
+    fn lock_host(&self) -> std::sync::MutexGuard<'_, HostDisplayCache> {
+        self.host.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn require_connected_ip(&self) -> Result<String, String> {
+        self.connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| "Not connected.".to_string())
+    }
+
+    fn open_display_indices(&self) -> Vec<usize> {
+        self.windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|w| w.display_index)
+            .collect()
+    }
+
+    fn host_display_count(&self) -> usize {
+        self.lock_host().len().max(1)
+    }
+
     fn stop(&self) {
         self.kill_pair();
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
@@ -401,7 +426,7 @@ impl SessionInner {
         } else {
             None
         };
-        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let host = self.lock_host();
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let scale = prefs.scale;
         let open_indices: Vec<usize> = windows.iter().map(|w| w.display_index).collect();
@@ -411,7 +436,7 @@ impl SessionInner {
         let mut width = DEFAULT_WIDTH;
         let mut height = DEFAULT_HEIGHT;
         let mut options = Vec::new();
-        for (i, host_d) in host.iter().enumerate() {
+        for (i, host_d) in host.displays().iter().enumerate() {
             let (sw, sh) = display::apply_scale(host_d.width, host_d.height, scale);
             if i == 0 || open_indices.contains(&i) {
                 width = sw;
@@ -442,6 +467,7 @@ impl SessionInner {
             scale,
             codec: prefs.codec,
             bitrate_mbps: prefs.bitrate_mbps,
+            hotkey_shift: prefs.hotkey_shift,
             displays,
             scale_options: options,
         }
@@ -449,8 +475,22 @@ impl SessionInner {
 
     fn set_prefs(&self, prefs: StreamPrefs) -> Result<(), String> {
         let prefs = validate_prefs(prefs)?;
+        let old = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let video_changed = old.scale != prefs.scale
+            || old.fps != prefs.fps
+            || old.codec != prefs.codec
+            || old.bitrate_mbps != prefs.bitrate_mbps;
+        let hotkey_changed = old.hotkey_shift != prefs.hotkey_shift;
         *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = prefs.clone();
         save_prefs(&prefs);
+        self.lock_host().set_hotkey_shift(prefs.hotkey_shift);
+        if hotkey_changed {
+            self.broadcast_hotkey_shift(prefs.hotkey_shift);
+            let _ = self.broadcast_display_map();
+        }
+        if !video_changed {
+            return Ok(());
+        }
         let ip = self
             .connected_ip
             .lock()
@@ -476,33 +516,16 @@ impl SessionInner {
     }
 
     fn open_all_displays(&self) -> Result<(), String> {
-        let ip = self
-            .connected_ip
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .ok_or_else(|| "Not connected.".to_string())?;
+        let ip = self.require_connected_ip()?;
         self.refresh_host_displays(&ip);
-        let mut count = self
-            .host_displays
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-            .max(1);
-        const MAX_DISPLAY_WINDOWS: usize = 4;
+        let mut count = self.host_display_count();
         if count > MAX_DISPLAY_WINDOWS {
             eprintln!(
                 "Eclipse: opening first {MAX_DISPLAY_WINDOWS} of {count} host displays (GPU encode limit)"
             );
             count = MAX_DISPLAY_WINDOWS;
         }
-        let open: Vec<usize> = self
-            .windows
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|w| w.display_index)
-            .collect();
+        let open = self.open_display_indices();
         for index in 0..count {
             if !open.contains(&index) {
                 self.spawn_window(&ip, index, index == 0)?;
@@ -512,26 +535,19 @@ impl SessionInner {
     }
 
     fn switch_display(&self, index: usize, pid: Option<u32>) -> Result<(), String> {
-        let ip = self
-            .connected_ip
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .ok_or_else(|| "Not connected.".to_string())?;
+        let ip = self.require_connected_ip()?;
         self.refresh_host_displays(&ip);
-        let count = self
-            .host_displays
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-            .max(1);
+        let count = self.host_display_count();
         if index >= count {
             return Ok(());
         }
         let retarget = {
             let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
             let pos = if let Some(pid) = pid {
-                windows.iter().position(|w| w.child.id() == pid)
+                windows
+                    .iter()
+                    .position(|w| w.child.id() == pid)
+                    .or_else(|| windows.len().checked_sub(1))
             } else {
                 windows.len().checked_sub(1)
             };
@@ -552,7 +568,12 @@ impl SessionInner {
         Ok(())
     }
 
-    fn connect(&self, peer_ip: &str, trust_new_cert: bool) -> Result<(), String> {
+    fn connect(
+        &self,
+        peer_ip: &str,
+        trust_new_cert: bool,
+        known_displays: Vec<DisplayInfo>,
+    ) -> Result<(), String> {
         let ip = peer_ip.trim();
         if ip.is_empty() {
             return Err("No peer IP.".into());
@@ -571,6 +592,7 @@ impl SessionInner {
         }
 
         self.stop();
+        self.seed_host_displays(ip, known_displays);
 
         pairing::ensure_gamestream_http(ip).map_err(|err| err.into_message())?;
         pairing::ensure_host_tls(ip, trust_new_cert).map_err(|err| err.into_message())?;
@@ -581,9 +603,9 @@ impl SessionInner {
         pairing::ensure_host_video(ip).map_err(|err| err.into_message())?;
 
         self.refresh_host_displays(ip);
-        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let host = self.lock_host();
         let native = host.first().cloned();
-        let start_index = host.iter().position(|d| d.focused).unwrap_or(0);
+        let start_index = host.focused_index();
         drop(host);
 
         let (nw, nh) = native
@@ -602,13 +624,35 @@ impl SessionInner {
         Ok(())
     }
 
+    fn seed_host_displays(&self, ip: &str, known: Vec<DisplayInfo>) {
+        let seed = if known.is_empty() {
+            crate::discovery::list_peers()
+                .peers
+                .into_iter()
+                .find(|p| p.ip == ip)
+                .map(|p| p.displays)
+                .unwrap_or_default()
+        } else {
+            known
+        };
+        let shift = self
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hotkey_shift;
+        let mut host = self.lock_host();
+        host.clear();
+        host.set_hotkey_shift(shift);
+        host.seed(seed);
+    }
+
     fn refresh_host_displays(&self, ip: &str) {
-        let displays = pairing::fetch_displays(ip).unwrap_or_default();
-        *self.host_displays.lock().unwrap_or_else(|e| e.into_inner()) = displays;
+        let fetched = pairing::fetch_displays(ip);
+        self.lock_host().merge_fetch(fetched);
     }
 
     fn stream_size_for(&self, display_index: usize) -> (u32, u32) {
-        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let host = self.lock_host();
         let scale = self
             .prefs
             .lock()
@@ -625,22 +669,16 @@ impl SessionInner {
     fn spawn_window(&self, ip: &str, display_index: usize, audio: bool) -> Result<(), String> {
         let (width, height) = self.stream_size_for(display_index);
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let args = stream_args(ip, width, height, Some(display_index), audio, &prefs);
-        let port = *self.control_port.lock().unwrap_or_else(|e| e.into_inner());
-        let display_name = self
-            .host_displays
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(display_index)
-            .map(|d| d.name.clone())
-            .filter(|n| !n.is_empty());
-        let mut env = Vec::new();
-        if let Some(port) = port {
-            env.push(("ECLIPSE_CONTROL", format!("127.0.0.1:{port}")));
-        }
-        if let Some(name) = display_name {
-            env.push(("ECLIPSE_DISPLAY_NAME", name));
-        }
+        let (display_map, env) = self.moonlight_display_env(display_index);
+        let args = stream_args(
+            ip,
+            width,
+            height,
+            Some(display_index),
+            audio,
+            &prefs,
+            &display_map,
+        );
         let child = MOONLIGHT
             .spawn_args_env(&args, &env)
             .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;
@@ -654,6 +692,37 @@ impl SessionInner {
                 ui_port: None,
             });
         Ok(())
+    }
+
+    fn moonlight_display_env(
+        &self,
+        display_index: usize,
+    ) -> (String, Vec<(&'static str, String)>) {
+        let port = *self.control_port.lock().unwrap_or_else(|e| e.into_inner());
+        let host = self.lock_host();
+        let display_name = host.name(display_index).map(str::to_string);
+        let display_map = host.map().to_string();
+        drop(host);
+        let mut env = Vec::new();
+        if let Some(port) = port {
+            env.push(("ECLIPSE_CONTROL", format!("127.0.0.1:{port}")));
+        }
+        if let Some(name) = display_name {
+            env.push(("ECLIPSE_DISPLAY_NAME", name));
+        }
+        if !display_map.is_empty() {
+            env.push(("ECLIPSE_DISPLAY_MAP", display_map.clone()));
+        }
+        let shift = self
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hotkey_shift;
+        env.push((
+            "ECLIPSE_HOTKEY_SHIFT",
+            if shift { "1".into() } else { "0".into() },
+        ));
+        (display_map, env)
     }
 
     fn respawn_window(&self, ip: &str, display_index: usize, audio: bool) -> Result<(), String> {
@@ -678,18 +747,8 @@ impl SessionInner {
         }
     }
 
-    fn broadcast_display_map(&self) -> String {
-        if let Some(ip) = self
-            .connected_ip
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            self.refresh_host_displays(&ip);
-        }
-        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
-        let body = format_display_map(&host);
-        drop(host);
+    fn broadcast_hotkey_shift(&self, shift: bool) {
+        let body = if shift { "hotkey-shift 1" } else { "hotkey-shift 0" };
         let ports: Vec<u16> = self
             .windows
             .lock()
@@ -698,7 +757,23 @@ impl SessionInner {
             .filter_map(|w| w.ui_port)
             .collect();
         for port in ports {
-            push_display_map(port, &body);
+            push_display_map(port, body);
+        }
+    }
+
+    fn broadcast_display_map(&self) -> String {
+        let body = self.lock_host().map().to_string();
+        let ports: Vec<u16> = self
+            .windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|w| w.ui_port)
+            .collect();
+        if !body.is_empty() {
+            for port in ports {
+                push_display_map(port, &body);
+            }
         }
         body
     }
@@ -913,6 +988,9 @@ fn load_prefs() -> StreamPrefs {
     {
         prefs.bitrate_mbps = n;
     }
+    if let Some(shift) = value.get("hotkeyShift").and_then(|d| d.as_bool()) {
+        prefs.hotkey_shift = shift;
+    }
     prefs
 }
 
@@ -927,6 +1005,7 @@ fn save_prefs(prefs: &StreamPrefs) {
         "fps": prefs.fps,
         "codec": prefs.codec,
         "bitrateMbps": prefs.bitrate_mbps,
+        "hotkeyShift": prefs.hotkey_shift,
     });
     let _ = std::fs::write(path, body.to_string());
 }
@@ -954,7 +1033,8 @@ mod tests {
                 960,
                 Some(0),
                 true,
-                &StreamPrefs::default()
+                &StreamPrefs::default(),
+                "0;Ctrl+Alt+1;DP-1|1;Ctrl+Alt+2;HDMI",
             ),
             [
                 "stream",
@@ -974,6 +1054,8 @@ mod tests {
                 "windowed",
                 "--host-display",
                 "0",
+                "--eclipse-display-map",
+                "0;Ctrl+Alt+1;DP-1|1;Ctrl+Alt+2;HDMI",
                 "100.64.0.1",
                 "Desktop"
             ]
@@ -1020,14 +1102,14 @@ no Qt platform plugin
     #[test]
     fn connect_reports_empty_ip() {
         let session = SessionProcess::new();
-        let err = session.connect("  ", false).unwrap_err();
+        let err = session.connect("  ", false, Vec::new()).unwrap_err();
         assert_eq!(err, "No peer IP.");
     }
 
     #[test]
     fn connect_rejects_rfc1918() {
         let session = SessionProcess::new();
-        let err = session.connect("192.168.1.1", false).unwrap_err();
+        let err = session.connect("192.168.1.1", false, Vec::new()).unwrap_err();
         assert!(err.contains("100.64.0.0/10"), "{err}");
     }
 
@@ -1086,31 +1168,6 @@ no Qt platform plugin
             }
         );
         assert_eq!(parse_control_line("nope"), ControlCmd::Ignore);
-    }
-
-    #[test]
-    fn display_map_lists_shortcuts() {
-        let displays = [
-            DisplayInfo {
-                name: "eDP-1".into(),
-                width: 1920,
-                height: 1080,
-                focused: true,
-            },
-            DisplayInfo {
-                name: "HDMI-A-1".into(),
-                width: 2560,
-                height: 1440,
-                focused: false,
-            },
-        ];
-        assert_eq!(
-            format_display_map(&displays),
-            "0\tCtrl+Alt+1\teDP-1\n1\tCtrl+Alt+2\tHDMI-A-1\n"
-        );
-        assert_eq!(display_shortcut(0), "Ctrl+Alt+1");
-        assert_eq!(display_shortcut(8), "Ctrl+Alt+9");
-        assert_eq!(display_shortcut(9), "");
     }
 
     #[cfg(unix)]

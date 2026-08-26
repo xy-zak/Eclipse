@@ -4,12 +4,14 @@ import chartNetwork from "../assets/icons/chart-network.svg?raw";
 import checkCircle from "../assets/icons/check-circle.svg?raw";
 import clock from "../assets/icons/clock.svg?raw";
 import cog from "../assets/icons/cog.svg?raw";
+import command from "../assets/icons/command.svg?raw";
 import expand from "../assets/icons/expand.svg?raw";
-import exclamation from "../assets/icons/exclamation.svg?raw";
+import infoCircle from "../assets/icons/info-circle.svg?raw";
 import minus from "../assets/icons/minus.svg?raw";
 import moonSolid from "../assets/icons/moon-solid.svg?raw";
 import sparklesSolid from "../assets/icons/sparkles-solid.svg?raw";
 import spinner from "../assets/icons/spinner.svg?raw";
+import refresh from "../assets/icons/refresh.svg?raw";
 import sunSolid from "../assets/icons/sun-solid.svg?raw";
 import times from "../assets/icons/times.svg?raw";
 import timesCircle from "../assets/icons/times-circle.svg?raw";
@@ -22,11 +24,13 @@ const ICONS = {
   "check-circle": checkCircle,
   "times-circle": timesCircle,
   spinner,
+  refresh,
   minus,
   expand,
   times,
   cog,
-  exclamation,
+  command,
+  "info-circle": infoCircle,
   analytics,
   clock,
 } as const;

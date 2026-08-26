@@ -4,10 +4,13 @@ import { Button } from "./components/Button";
 import { CertTrustDialog, parseTlsCertChangedHost } from "./components/CertTrustDialog";
 import { ClientPanel, type ClientLink } from "./components/ClientPanel";
 import { HostPanel } from "./components/HostPanel";
-import { InfoPopover } from "./components/InfoPopover";
+import { CommandsPopover } from "./components/CommandsPopover";
+import { HostsInfoPopover } from "./components/InfoPopover";
+import { MoonlightPopover } from "./components/MoonlightPopover";
 import { PixelIcon } from "./components/PixelIcon";
-import { StatusMark } from "./components/StatusMark";
 import { StreamSettings } from "./components/StreamSettings";
+import { SunshinePopover } from "./components/SunshinePopover";
+import { TailscalePopover } from "./components/TailscalePopover";
 import { TitleBar } from "./components/TitleBar";
 import type {
   DiscoverySnapshot,
@@ -22,6 +25,7 @@ const DEFAULT_PREFS: StreamPrefs = {
   fps: 60,
   codec: "H.264",
   bitrateMbps: 20,
+  hotkeyShift: false,
 };
 
 function formatMbps(mbps: number | null): string {
@@ -54,6 +58,7 @@ function prefsFromSession(session: SessionStatus | null): StreamPrefs {
     fps: session.fps,
     codec: session.codec || DEFAULT_PREFS.codec,
     bitrateMbps: session.bitrateMbps || DEFAULT_PREFS.bitrateMbps,
+    hotkeyShift: Boolean(session.hotkeyShift),
   };
 }
 
@@ -171,7 +176,8 @@ export default function App() {
     setError(null);
     setCertPromptIp(null);
     setConnectingIp(ip);
-    invoke("connect", { ip, trustNewCert })
+    const displays = peers.find((p) => p.ip === ip)?.displays ?? [];
+    invoke("connect", { ip, trustNewCert, displays })
       .then(() => invoke<SessionStatus>("session_status").then(setSession))
       .catch((err: unknown) => {
         const changed = parseTlsCertChangedHost(err);
@@ -211,6 +217,28 @@ export default function App() {
   const openHostAdmin = () => {
     setError(null);
     invoke("open_host_admin").catch((err: unknown) => setError(String(err)));
+  };
+
+  const setHostRunning = async (on: boolean) => {
+    setError(null);
+    try {
+      await invoke("set_host_running", { on });
+      setStatus(await invoke<SidecarStatus>("sidecar_status"));
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
+  };
+
+  const setKeepHostOnExit = async (on: boolean) => {
+    setError(null);
+    try {
+      await invoke("set_keep_host_on_exit", { on });
+      setStatus(await invoke<SidecarStatus>("sidecar_status"));
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
   };
 
   const copyWebUiPassword = async () => {
@@ -264,18 +292,6 @@ export default function App() {
           <h1 className="font-title text-6xl font-normal uppercase tracking-tight sm:text-7xl">
             Eclipse
           </h1>
-          <div className="mt-4 flex flex-wrap justify-center gap-x-8 gap-y-2">
-            <StatusMark
-              ok={sunshineReady}
-              label="Sunshine"
-              icon={<PixelIcon name="sun-solid" size={16} />}
-            />
-            <StatusMark
-              ok={moonlightReady}
-              label="Moonlight"
-              icon={<PixelIcon name="moon-solid" size={16} />}
-            />
-          </div>
         </header>
 
         <section className="flex min-w-0 flex-col gap-4">
@@ -283,18 +299,34 @@ export default function App() {
             <h2 className="min-w-0 flex-1 text-sm leading-snug font-medium tracking-widest text-moonlight/70">
               CLIENT [ this computer ]
             </h2>
-            <InfoPopover />
+            <div className="flex shrink-0 items-center gap-2">
+              <MoonlightPopover
+                moonlightPresent={Boolean(status?.moonlightPresent)}
+              />
+              <SunshinePopover
+                sunshinePresent={Boolean(status?.sunshinePresent)}
+                sunshineRunning={Boolean(status?.sunshineRunning)}
+                keepHostOnExit={Boolean(status?.keepHostOnExit)}
+                onOpenHostAdmin={openHostAdmin}
+                onCopyWebUiPassword={copyWebUiPassword}
+                onSetHostRunning={setHostRunning}
+                onSetKeepHostOnExit={setKeepHostOnExit}
+              />
+              <TailscalePopover
+                tailscaleOk={Boolean(discovery?.tailscaleOk)}
+                message={discovery?.message ?? null}
+              />
+              <CommandsPopover prefs={prefs} onChange={setPrefs} />
+            </div>
           </div>
           <ClientPanel
             local={discovery?.local ?? null}
             tailscaleOnline={Boolean(discovery?.local?.tailscaleOnline)}
-            eclipseOnline={sunshineReady}
-            sunshinePresent={Boolean(status?.sunshinePresent)}
+            sunshineOnline={sunshineReady}
+            moonlightOnline={moonlightReady}
             inbound={inboundLink}
             controlling={controllingLink}
             onForceDisconnect={forceDisconnectInbound}
-            onOpenHostAdmin={openHostAdmin}
-            onCopyWebUiPassword={copyWebUiPassword}
           />
         </section>
 
@@ -308,12 +340,10 @@ export default function App() {
             <div className="flex shrink-0 items-center gap-2">
               <StreamSettings
                 prefs={prefs}
-                hosts={peers.filter(
-                  (peer) => peer.hostOnline && peer.displays.length > 0,
-                )}
                 disabled={connectingIp !== null || inbound !== null}
                 onChange={setPrefs}
               />
+              <HostsInfoPopover />
               <Button
                 variant="ghost"
                 className="h-9 w-9 border-sunshine px-0 text-sunshine hover:bg-sunshine hover:text-eclipse disabled:border-sunshine disabled:text-sunshine"
@@ -324,7 +354,11 @@ export default function App() {
                 }}
                 disabled={loading}
               >
-                <PixelIcon name="spinner" size={16} />
+                <PixelIcon
+                  name="refresh"
+                  size={16}
+                  className={loading ? "animate-spin" : ""}
+                />
               </Button>
             </div>
           </div>

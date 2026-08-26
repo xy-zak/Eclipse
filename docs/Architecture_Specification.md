@@ -135,12 +135,13 @@ Once a session is established, Tauri gets out of the way. The raw data pipeline 
 
 Host display inventory is `GET /api/displays` on Sunshine `:47990`. Each stream window can select a host output (`--host-display`); Sunshine runs one capture+encode pipeline per output. Audio plays on the primary window only.
 
-In-stream shortcuts are **Ctrl+Alt** (consumed in Moonlight, not sent to the host; Shift is reserved for Sunshine’s F1–F12 display switch):
+In-stream shortcuts use **Ctrl+Alt** by default (consumed in Moonlight, not sent to the host). The Client **Commands** dropdown can switch the chord to **Ctrl+Alt+Shift**. Shift is otherwise reserved for Sunshine’s F1–F12 display switch:
 
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+Alt+Esc | Close every client window and disconnect (quit the host Desktop app) |
 | Ctrl+Alt+F | Toggle letterboxed fullscreen on this window |
+| Ctrl+Alt+K | Toggle Super / Windows key ownership (client vs host) |
 | Ctrl+Alt+- | List host displays and this window’s active display |
 | Ctrl+Alt+1–9 | Retarget this window to host display N |
 | Ctrl+Alt+0 | Open one client window per host display |
@@ -167,8 +168,8 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
 ### 6.1 Process Lifecycle Management
 
 * **Startup (implemented):** Packaged installs already have Sunshine running as a system service. Tauri probes `127.0.0.1:47990` (and the OS service name) and **attaches** if the host is up. If the service is installed but stopped (tray toggle), Eclipse does **not** spawn a competing child. Source/`tauri dev` still spawn a child when no service is present. `eclipse --tray` starts hidden with only the tray icon.
-* **Tray (implemented):** Login autostart (XDG autostart / Windows Run). Menu: Open Eclipse, Host streaming (start/stop the service or child), Quit Eclipse. Window close hides to the tray. Host toggle does not `disable` the unit, so a reboot brings the host back up.
-* **Shutdown (implemented):** On `RunEvent::Exit` (Quit from the tray), Rust kills only a Sunshine **child this process spawned**. A boot-time host service is left as the user last toggled it.
+* **Tray (implemented):** Login autostart (XDG autostart / Windows Run). Menu: Open Eclipse, Host streaming (start/stop the service or child), Quit Eclipse. The CLIENT sun dropdown uses the same start/stop path, plus whether Sunshine stays running after quit. Window close hides to the tray. Host toggle does not `disable` the unit, so a reboot brings the host back up.
+* **Shutdown (implemented):** On `RunEvent::Exit` (Quit from the tray), if **Keep Sunshine Host running in background** is on, Rust leaves the host service or GUI-owned child running. If **Stop Sunshine Host when Eclipse closes** is chosen, Rust stops the service or child. Default is keep-on-exit for packaged installs and stop-on-exit for source/`tauri dev`.
 * **API Control (implemented):** Eclipse reads host displays via Sunshine `GET /api/displays`, inbound clients via `GET /api/sessions`, and ends the Desktop app (and kicks clients) with `POST /api/apps/close`. Stream scale is a local preference (denominator 1, 2, 3…), not a Sunshine desktop-mode change.
 * **Client Spawning (implemented):** When a connection is requested, Tauri spawns one or more Moonlight sidecars as `moonlight stream --resolution WxH --fps 60 --video-codec H.264 --no-hdr --packet-size 1024 --absolute-mouse --display-mode windowed --host-display N <ip> Desktop`. Pairing runs first if `moonlight list` does not already show Desktop. On Windows, Eclipse copies `resources/moonlight-runtime` (Qt/SDL/FFmpeg from `windeployqt`) beside `moonlight.exe` before spawn. Moonlight talks back on `ECLIPSE_CONTROL=127.0.0.1:<port>` for Ctrl+Alt+0 / 1–9 / Esc.
 
