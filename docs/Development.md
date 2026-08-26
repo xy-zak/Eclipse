@@ -33,7 +33,7 @@ You need a **compile toolchain** plus the same GPU/session conditions as a user.
 | Qt 6 (`qmake6` / `qmake`) | Moonlight-Qt | Widgets, Quick, SVG, Wayland plugin on Linux |
 | C/C++ compiler | Engines | `base-devel` / MSVC |
 
-CUDA Toolkit (`nvcc`) is installed **as needed** by bootstrap when an NVIDIA GPU is present. The sidecar build turns Sunshine CUDA **on** when `nvcc` is on `PATH`, unless you set `ECLIPSE_CUDA=off`. Force toolkit install / CUDA compile with `ECLIPSE_CUDA=on`. Bootstrap does **not** install NVIDIA kernel or Game Ready drivers.
+CUDA Toolkit (`nvcc`) is installed **as needed** by bootstrap when an NVIDIA GPU is present. On **Linux**, the sidecar build turns Sunshine CUDA **on** when `nvcc` is on `PATH`, unless you set `ECLIPSE_CUDA=off`. Force toolkit install / CUDA compile with `ECLIPSE_CUDA=on`. On **Windows**, Sunshine encodes with NVENC; `-DSUNSHINE_ENABLE_CUDA` is a Linux-only CMake option and is not passed. Bootstrap does **not** install NVIDIA kernel or Game Ready drivers.
 
 Do **not** check out Moonlight tag `v6.1.0` on current Arch: it fails against FFmpeg 8 (`AVCodec::pix_fmts` removed, Vulkan hwcontext field renames). The tracked commit is post-v6.1.0. Re-pin when Moonlight cuts a release that builds on FFmpeg 8.
 

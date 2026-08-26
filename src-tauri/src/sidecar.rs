@@ -469,11 +469,14 @@ fn prepare_sunshine_share(bin_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn moonlight_runtime_candidates(bin_dir: &Path) -> Vec<PathBuf> {
+    // Prefer packaged / freshly built runtimes over a previously staged copy
+    // beside the exe. Stale avcodec-N.dll next to moonlight.exe would otherwise
+    // win and skip refresh after an FFmpeg SONAME bump.
     vec![
-        bin_dir.to_path_buf(),
-        bin_dir.join("moonlight-runtime"),
         bin_dir.join("resources").join("moonlight-runtime"),
+        bin_dir.join("moonlight-runtime"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MOONLIGHT_RUNTIME_REL),
+        bin_dir.to_path_buf(),
     ]
 }
 
@@ -549,9 +552,23 @@ fn stage_sunshine_share(bin_dir: &Path, assets: &Path) -> std::io::Result<PathBu
     Ok(dest)
 }
 
-fn moonlight_runtime_ready(bin_dir: &Path) -> bool {
-    bin_dir.join("Qt6Core.dll").is_file()
-        && bin_dir.join("platforms").join("qwindows.dll").is_file()
+/// Return the `avcodec-*.dll` basename in `dir`, if present.
+fn moonlight_avcodec_dll(dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("avcodec-") && name.ends_with(".dll") {
+            return Some(name.into_owned());
+        }
+    }
+    None
+}
+
+fn moonlight_runtime_ready(dir: &Path) -> bool {
+    dir.join("Qt6Core.dll").is_file()
+        && dir.join("platforms").join("qwindows.dll").is_file()
+        && moonlight_avcodec_dll(dir).is_some()
 }
 
 /// Copy Windows Moonlight Qt/SDL/FFmpeg runtime files beside the sidecar binary.
@@ -565,7 +582,14 @@ fn stage_moonlight_runtime(bin_dir: &Path, runtime: &Path) -> std::io::Result<()
             "Moonlight runtime directory is missing",
         ));
     }
-    if paths_same(runtime, bin_dir) || moonlight_runtime_ready(bin_dir) {
+    if paths_same(runtime, bin_dir) {
+        return Ok(());
+    }
+    // Refresh when Qt loader files are missing *or* FFmpeg SONAME drifted
+    // (e.g. avcodec-61.dll staged, runtime now ships avcodec-63.dll).
+    let dest_ready = moonlight_runtime_ready(bin_dir);
+    let same_avcodec = moonlight_avcodec_dll(bin_dir) == moonlight_avcodec_dll(runtime);
+    if dest_ready && same_avcodec {
         return Ok(());
     }
     copy_dir_all(runtime, bin_dir)
@@ -1266,6 +1290,7 @@ mod tests {
         std::fs::create_dir_all(runtime.join("platforms")).unwrap();
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(runtime.join("Qt6Core.dll"), "qt").unwrap();
+        std::fs::write(runtime.join("avcodec-63.dll"), "ff").unwrap();
         std::fs::write(runtime.join("platforms").join("qwindows.dll"), "plugin").unwrap();
         stage_moonlight_runtime(&bin_dir, &runtime).unwrap();
         assert!(moonlight_runtime_ready(&bin_dir));
@@ -1284,14 +1309,38 @@ mod tests {
         std::fs::create_dir_all(runtime.join("platforms")).unwrap();
         std::fs::create_dir_all(bin_dir.join("platforms")).unwrap();
         std::fs::write(runtime.join("Qt6Core.dll"), "new").unwrap();
+        std::fs::write(runtime.join("avcodec-63.dll"), "new").unwrap();
         std::fs::write(runtime.join("platforms").join("qwindows.dll"), "new").unwrap();
         std::fs::write(bin_dir.join("Qt6Core.dll"), "old").unwrap();
+        std::fs::write(bin_dir.join("avcodec-63.dll"), "old").unwrap();
         std::fs::write(bin_dir.join("platforms").join("qwindows.dll"), "old").unwrap();
         stage_moonlight_runtime(&bin_dir, &runtime).unwrap();
         assert_eq!(
             std::fs::read_to_string(bin_dir.join("Qt6Core.dll")).unwrap(),
             "old"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_moonlight_runtime_refreshes_on_avcodec_soname_bump() {
+        let root = unique_temp("eclipse-moon-avcodec");
+        let runtime = root.join("runtime");
+        let bin_dir = root.join("debug");
+        std::fs::create_dir_all(runtime.join("platforms")).unwrap();
+        std::fs::create_dir_all(bin_dir.join("platforms")).unwrap();
+        std::fs::write(runtime.join("Qt6Core.dll"), "new").unwrap();
+        std::fs::write(runtime.join("avcodec-63.dll"), "new").unwrap();
+        std::fs::write(runtime.join("platforms").join("qwindows.dll"), "new").unwrap();
+        std::fs::write(bin_dir.join("Qt6Core.dll"), "old").unwrap();
+        std::fs::write(bin_dir.join("avcodec-61.dll"), "old").unwrap();
+        std::fs::write(bin_dir.join("platforms").join("qwindows.dll"), "old").unwrap();
+        stage_moonlight_runtime(&bin_dir, &runtime).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bin_dir.join("Qt6Core.dll")).unwrap(),
+            "new"
+        );
+        assert!(bin_dir.join("avcodec-63.dll").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1310,19 +1359,22 @@ mod tests {
         let runtime = root.join("moonlight-runtime");
         std::fs::create_dir_all(runtime.join("platforms")).unwrap();
         std::fs::write(runtime.join("Qt6Core.dll"), "qt").unwrap();
+        std::fs::write(runtime.join("avcodec-63.dll"), "ff").unwrap();
         std::fs::write(runtime.join("platforms").join("qwindows.dll"), "plugin").unwrap();
         assert_eq!(find_moonlight_runtime(&root).as_deref(), Some(runtime.as_path()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn moonlight_runtime_ready_requires_qwindows() {
+    fn moonlight_runtime_ready_requires_qwindows_and_avcodec() {
         let root = unique_temp("eclipse-moon-no-plugin");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("Qt6Core.dll"), "qt").unwrap();
         assert!(!moonlight_runtime_ready(&root));
         std::fs::create_dir_all(root.join("platforms")).unwrap();
         std::fs::write(root.join("platforms").join("qwindows.dll"), "plugin").unwrap();
+        assert!(!moonlight_runtime_ready(&root));
+        std::fs::write(root.join("avcodec-63.dll"), "ff").unwrap();
         assert!(moonlight_runtime_ready(&root));
         let _ = std::fs::remove_dir_all(&root);
     }

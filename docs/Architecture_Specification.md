@@ -145,7 +145,7 @@ In-stream shortcuts are **Ctrl+Alt** (consumed in Moonlight, not sent to the hos
 | Ctrl+Alt+0 | Open one client window per host display |
 | Ctrl+Alt+Q | Close this window; last window disconnects |
 
-CUDA is an optional *build* feature for Sunshine on NVIDIA hosts (`ECLIPSE_CUDA=auto|on|off`). Running NVENC does not require compiling with CUDA if the NVIDIA driver already exposes it; the bootstrap machine had no `nvcc` and used VA-API instead.
+CUDA is an optional *build* feature for Sunshine on Linux NVIDIA hosts (`ECLIPSE_CUDA=auto|on|off`). Windows builds use NVENC without that CMake flag. Running NVENC does not require compiling with CUDA if the NVIDIA driver already exposes it; the bootstrap machine had no `nvcc` and used VA-API instead.
 
 ### 5.2 Input (I/O) Pipeline
 

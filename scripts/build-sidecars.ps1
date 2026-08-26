@@ -131,7 +131,9 @@ function Apply-SidecarPatches {
             continue
         }
         Write-Host "==> Applying $($patch.Name)"
-        $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName)
+        # Quiet first: git prints "error: patch failed" on overlap even when the
+        # tree already contains the change. Only surface stderr on a real miss.
+        $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName) -Quiet
         if ($applied -eq 0) {
             continue
         }
@@ -142,6 +144,7 @@ function Apply-SidecarPatches {
             Write-Host "Already applied $($patch.Name) (later patches overlap)"
             continue
         }
+        Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName) | Out-Null
         throw "git apply failed for $($patch.Name) (exit $applied)"
     }
 }
@@ -183,12 +186,9 @@ Apply-MoonlightPatches
 $Triple = (rustc --print host-tuple).Trim()
 Write-Host "Host triple: $Triple"
 
-$cudaMode = $env:ECLIPSE_CUDA
-if (-not $cudaMode) { $cudaMode = "auto" }
-$useCuda = "OFF"
-if ($cudaMode -eq "on") { $useCuda = "ON" }
-elseif ($cudaMode -eq "auto" -and (Get-Command nvcc -ErrorAction SilentlyContinue)) { $useCuda = "ON" }
-Write-Host "Sunshine CUDA: $useCuda"
+# SUNSHINE_ENABLE_CUDA is Linux-only (options.cmake). Windows uses NVENC via
+# the nvenc_* targets; passing -DSUNSHINE_ENABLE_CUDA triggers unused-cli.
+Write-Host "Sunshine CUDA: N/A on Windows (NVENC); ECLIPSE_CUDA does not affect this CMake"
 
 if (-not (Test-EclipseMsys2SunshineDeps)) {
     throw "MSYS2 UCRT64 OpenSSL/gcc missing. Run scripts/bootstrap.ps1 (Sunshine cannot be built with MSVC)."
@@ -225,7 +225,7 @@ Write-Host "Sunshine version: $sunTag"
 # backslash continuations are not line joins.
 $icoFlag = ""
 if ($sunIcoUnix) { $icoFlag = "-DSUNSHINE_ICON_PATH='$sunIcoUnix'" }
-Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF $icoFlag -DSUNSHINE_ENABLE_CUDA=$useCuda -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
+Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF $icoFlag -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
 
 Write-Host "==> Building Sunshine"
 Invoke-EclipseMsys2 -Command "cmake --build '$buildUnix' && cmake --install '$buildUnix'"
