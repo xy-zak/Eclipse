@@ -1,0 +1,138 @@
+Subject: sunshine-cgnat-pair
+Why: Loopback/CGNAT may call pin/displays/sessions/apps/close without Basic Auth; RFC1918 still needs credentials.
+Depends-on: vendor/PINS sunshine; apply before sunshine-displays.patch
+
+diff --git i/src/network.cpp w/src/network.cpp
+index 2a78b2f9..08f9acf2 100644
+--- i/src/network.cpp
++++ w/src/network.cpp
+@@ -92,16 +92,33 @@ namespace net {
+           return LAN;
+         }
+       }
+     }
+ 
+     return WAN;
+   }
+ 
++  bool is_tailscale_cgnat(const std::string_view &view) {
++    boost::system::error_code ec;
++    auto addr = normalize_address(ip::make_address(std::string {view}, ec));
++    if (ec || !addr.is_v4()) {
++      return false;
++    }
++    const auto cgnat = ip::make_network_v4("100.64.0.0/10"sv);
++    return cgnat.hosts().find(addr.to_v4()) != cgnat.hosts().end();
++  }
++
++  bool is_trusted_pair_peer(const std::string_view &view) {
++    if (from_address(view) == PC) {
++      return true;
++    }
++    return is_tailscale_cgnat(view);
++  }
++
+   /**
+    * @brief Convert a network enum value to configuration text.
+    */
+   std::string_view to_enum_string(net_e net) {
+     switch (net) {
+       case PC:
+         return "pc"sv;
+       case LAN:
+diff --git i/src/network.h w/src/network.h
+index 679f35b8..7c8324b7 100644
+--- i/src/network.h
++++ w/src/network.h
+@@ -82,16 +82,31 @@ namespace net {
+   /**
+    * @brief Convert a Boost address family to Sunshine network enum value.
+    *
+    * @param view Boost.Log record view being formatted.
+    * @return Value converted from address.
+    */
+   net_e from_address(const std::string_view &view);
+ 
++  /**
++   * @brief Return whether the address is in Tailscale CGNAT space (100.64.0.0/10).
++   * @param view Address to classify. IPv4-mapped IPv6 is normalized first.
++   * @return True when the address is in 100.64.0.0/10.
++   */
++  bool is_tailscale_cgnat(const std::string_view &view);
++
++  /**
++   * @brief Return whether a peer may call pairing APIs without Basic Auth.
++   * @details Loopback (PC) and Tailscale CGNAT only. RFC1918 LAN is not trusted.
++   * @param view Address to classify.
++   * @return True when the peer is loopback or Tailscale CGNAT.
++   */
++  bool is_trusted_pair_peer(const std::string_view &view);
++
+   /**
+    * @brief Create an ENet host with the requested address family.
+    *
+    * @param af Address family used for socket creation or binding.
+    * @param addr Network address to bind, parse, or format.
+    * @param port TCP or UDP port number.
+    * @return ENet host bound to the requested address and port, or an empty handle on failure.
+    */
+diff --git i/src/confighttp.cpp w/src/confighttp.cpp
+index eee5677b..573039d6 100644
+--- i/src/confighttp.cpp
++++ w/src/confighttp.cpp
+@@ -546,31 +546,55 @@ namespace confighttp {
+     const SimpleWeb::CaseInsensitiveMultimap headers {
+       {"Location", path},
+       {"X-Frame-Options", "DENY"},
+       {"Content-Security-Policy", "frame-ancestors 'none';"}
+     };
+     response->write(SimpleWeb::StatusCode::redirection_temporary_redirect, headers);
+   }
+ 
++  /**
++   * @brief Return whether this request is a pairing/session API open to the tailnet.
++   * @param request HTTP request whose method and path are inspected.
++   * @return True for POST /api/pin, GET /api/displays, GET /api/sessions, POST /api/apps/close.
++   */
++  bool pairing_api_open_to_mesh(const req_https_t &request) {
++    const auto &method = request->method;
++    auto path = request->path;
++    if (const auto q = path.find('?'); q != std::string::npos) {
++      path.resize(q);
++    }
++    if (!path.empty() && path.back() == '/') {
++      path.pop_back();
++    }
++    return (method == "POST" && path == "/api/pin") ||
++           (method == "GET" && path == "/api/displays") ||
++           (method == "GET" && path == "/api/sessions") ||
++           (method == "POST" && path == "/api/apps/close");
++  }
++
+   /**
+    * @brief Authenticate the user.
+    * @param response The HTTP response object.
+    * @param request The HTTP request object.
+    * @return True if the user is authenticated, false otherwise.
+    */
+   bool authenticate(const resp_https_t &response, const req_https_t &request) {
+     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+ 
+     if (const auto ip_type = net::from_address(address); ip_type > http::origin_web_ui_allowed) {
+       BOOST_LOG(info) << "Web UI: ["sv << address << "] -- denied"sv;
+       response->write(SimpleWeb::StatusCode::client_error_forbidden);
+       return false;
+     }
+ 
++    if (pairing_api_open_to_mesh(request) && net::is_trusted_pair_peer(address)) {
++      return true;
++    }
++
+     // If credentials are shown, redirect the user to a /welcome page
+     if (config::sunshine.username.empty()) {
+       send_redirect(response, request, "/welcome");
+       return false;
+     }
+ 
+     auto fg = util::fail_guard([&]() {
+       send_unauthorized(response, request);

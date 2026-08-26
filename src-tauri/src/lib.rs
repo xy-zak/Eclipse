@@ -1,5 +1,6 @@
 mod discovery;
 mod display;
+mod hostconf;
 mod pairing;
 mod session;
 mod sidecar;
@@ -54,6 +55,17 @@ fn force_disconnect_inbound() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn web_ui_password() -> Result<String, String> {
+    crate::hostconf::read_web_ui_password()
+}
+
+#[tauri::command]
+fn open_host_admin() -> Result<(), String> {
+    tauri_plugin_opener::open_url("https://127.0.0.1:47990", None::<&str>)
+        .map_err(|err| format!("Could not open host admin: {err}"))
+}
+
+#[tauri::command]
 fn disconnect(session: State<SessionProcess>) {
     session.stop();
 }
@@ -67,8 +79,10 @@ async fn peer_latency(ip: String) -> Option<u32> {
 }
 
 #[tauri::command]
-async fn connect(app: tauri::AppHandle, ip: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<SessionProcess>().connect(&ip))
+async fn connect(app: tauri::AppHandle, ip: String, trust_new_cert: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<SessionProcess>().connect(&ip, trust_new_cert)
+    })
         .await
         .map_err(|err| format!("Connect task failed: {err}"))?
 }
@@ -101,7 +115,7 @@ fn show_main_window(app: &AppHandle) {
 
 fn host_tooltip(on: bool) -> String {
     if on {
-        "Eclipse — host streaming on".into()
+        "Eclipse — host streaming on · tailnet can connect".into()
     } else {
         "Eclipse — host streaming off".into()
     }
@@ -192,6 +206,8 @@ pub fn run() {
             session_status,
             inbound_status,
             force_disconnect_inbound,
+            web_ui_password,
+            open_host_admin,
             peer_latency,
             set_stream_prefs,
             open_all_displays

@@ -85,6 +85,12 @@ package() {
     "${pkgdir}/usr/lib/modules-load.d/eclipse-uinput.conf"
   install -Dm755 "${root}/packaging/linux/eclipse-hostctl" \
     "${pkgdir}/usr/lib/eclipse/eclipse-hostctl"
+  install -Dm755 "${root}/packaging/linux/host-setup.sh" \
+    "${pkgdir}/usr/lib/eclipse/host-setup.sh"
+  install -Dm644 "${root}/packaging/sunshine.conf" \
+    "${pkgdir}/usr/lib/eclipse/sunshine.conf"
+  install -Dm755 "${root}/packaging/linux/eclipse-host-sleep" \
+    "${pkgdir}/usr/lib/systemd/system-sleep/eclipse-host"
   install -Dm644 "${root}/packaging/linux/com.eclipse.hostctl.policy" \
     "${pkgdir}/usr/share/polkit-1/actions/com.eclipse.hostctl.policy"
   install -Dm644 "${root}/packaging/linux/10-eclipse-host.rules" \
@@ -93,6 +99,8 @@ package() {
     "${pkgdir}/etc/xdg/autostart/eclipse-tray.desktop"
   install -Dm644 "${root}/packaging/linux/eclipse.desktop" \
     "${pkgdir}/usr/share/applications/eclipse.desktop"
+  install -Dm644 "${root}/packaging/linux/com.eclipse.moonlight.desktop" \
+    "${pkgdir}/usr/share/applications/com.eclipse.moonlight.desktop"
 
   local icon="${root}/src-tauri/icons"
   install -Dm644 "${icon}/32x32.png" "${pkgdir}/usr/share/icons/hicolor/32x32/apps/eclipse.png"
@@ -101,4 +109,10 @@ package() {
   install -Dm644 "${icon}/128x128@2x.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/eclipse.png"
   install -Dm644 "${icon}/icon.png" "${pkgdir}/usr/share/icons/hicolor/512x512/apps/eclipse.png"
   install -Dm644 "${icon}/eclipse.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/eclipse.svg"
+  install -Dm644 "${icon}/moonlight.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg"
+  if [[ -f "${icon}/moonlight.png" ]]; then
+    install -Dm644 "${icon}/moonlight.png" \
+      "${pkgdir}/usr/share/icons/hicolor/32x32/apps/com.eclipse.moonlight.png"
+  fi
 }

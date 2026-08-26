@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost https://ipc.localhost http://localhost:1420 ws://localhost:1420 http://127.0.0.1:1420 ws://127.0.0.1:1420"
     }
   },
   "bundle": {
@@ -43,8 +43,7 @@
     ],
     "externalBin": ["binaries/sunshine", "binaries/moonlight"],
     "resources": {
-      "resources/sunshine": "share/sunshine",
-      "resources/moonlight-runtime": "moonlight-runtime"
+      "resources/sunshine": "share/sunshine"
     },
     "linux": {
       "deb": {
@@ -92,10 +91,15 @@
           "/usr/lib/systemd/system/eclipse-host.service": "../packaging/linux/eclipse-host.service",
           "/usr/lib/modules-load.d/eclipse-uinput.conf": "../packaging/linux/eclipse-uinput.conf",
           "/usr/lib/eclipse/eclipse-hostctl": "../packaging/linux/eclipse-hostctl",
+          "/usr/lib/eclipse/host-setup.sh": "../packaging/linux/host-setup.sh",
+          "/usr/lib/eclipse/sunshine.conf": "../packaging/sunshine.conf",
+          "/usr/lib/systemd/system-sleep/eclipse-host": "../packaging/linux/eclipse-host-sleep",
           "/usr/share/polkit-1/actions/com.eclipse.hostctl.policy": "../packaging/linux/com.eclipse.hostctl.policy",
           "/usr/share/polkit-1/rules.d/10-eclipse-host.rules": "../packaging/linux/10-eclipse-host.rules",
           "/etc/xdg/autostart/eclipse-tray.desktop": "../packaging/linux/eclipse-tray.desktop",
-          "/usr/share/icons/hicolor/scalable/apps/eclipse.svg": "icons/eclipse.svg"
+          "/usr/share/applications/com.eclipse.moonlight.desktop": "../packaging/linux/com.eclipse.moonlight.desktop",
+          "/usr/share/icons/hicolor/scalable/apps/eclipse.svg": "icons/eclipse.svg",
+          "/usr/share/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg": "icons/moonlight.svg"
         },
         "postInstallScript": "../packaging/linux/postinst.sh",
         "postRemoveScript": "../packaging/linux/postrm.sh"
@@ -135,10 +139,15 @@
           "/usr/lib/systemd/system/eclipse-host.service": "../packaging/linux/eclipse-host.service",
           "/usr/lib/modules-load.d/eclipse-uinput.conf": "../packaging/linux/eclipse-uinput.conf",
           "/usr/lib/eclipse/eclipse-hostctl": "../packaging/linux/eclipse-hostctl",
+          "/usr/lib/eclipse/host-setup.sh": "../packaging/linux/host-setup.sh",
+          "/usr/lib/eclipse/sunshine.conf": "../packaging/sunshine.conf",
+          "/usr/lib/systemd/system-sleep/eclipse-host": "../packaging/linux/eclipse-host-sleep",
           "/usr/share/polkit-1/actions/com.eclipse.hostctl.policy": "../packaging/linux/com.eclipse.hostctl.policy",
           "/usr/share/polkit-1/rules.d/10-eclipse-host.rules": "../packaging/linux/10-eclipse-host.rules",
           "/etc/xdg/autostart/eclipse-tray.desktop": "../packaging/linux/eclipse-tray.desktop",
-          "/usr/share/icons/hicolor/scalable/apps/eclipse.svg": "icons/eclipse.svg"
+          "/usr/share/applications/com.eclipse.moonlight.desktop": "../packaging/linux/com.eclipse.moonlight.desktop",
+          "/usr/share/icons/hicolor/scalable/apps/eclipse.svg": "icons/eclipse.svg",
+          "/usr/share/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg": "icons/moonlight.svg"
         },
         "postInstallScript": "../packaging/linux/postinst.sh",
         "postRemoveScript": "../packaging/linux/postrm.sh"

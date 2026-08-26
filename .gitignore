@@ -41,3 +41,6 @@ src-tauri/resources/windows/*
 packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/*.pkg.tar.*
+
+# Python
+scripts/__pycache__/

@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sunshine
+ExecStart=/usr/bin/systemd-inhibit --what=idle --who=Eclipse --why="Eclipse host streaming" --mode=block /usr/bin/sunshine
 WorkingDirectory=-/usr/lib/Eclipse
 ConfigurationDirectory=eclipse
 Restart=always

@@ -25,11 +25,11 @@ function Install-EclipseFirewallRules {
     Remove-EclipseFirewallRule $UdpName
 
     New-NetFirewallRule -DisplayName $TcpName -Direction Inbound -Action Allow -Protocol TCP `
-        -LocalPort 47984-47990,48010 -Profile Any -Enabled True | Out-Null
+        -LocalPort 47984-47990,48010 -RemoteAddress 100.64.0.0/10 -Profile Any -Enabled True | Out-Null
     New-NetFirewallRule -DisplayName $UdpName -Direction Inbound -Action Allow -Protocol UDP `
-        -LocalPort 47998-48010 -Profile Any -Enabled True | Out-Null
+        -LocalPort 47998-48010 -RemoteAddress 100.64.0.0/10 -Profile Any -Enabled True | Out-Null
 
-    Write-Host "Windows Firewall: allowed inbound TCP 47984-47990,48010 and UDP 47998-48010 (all profiles)."
+    Write-Host "Windows Firewall: allowed inbound TCP 47984-47990,48010 and UDP 47998-48010 from 100.64.0.0/10 (all profiles)."
 }
 
 function Uninstall-EclipseFirewallRules {

@@ -38,6 +38,27 @@ export function InfoPopover() {
             className={`z-50 mt-1 max-h-[min(36rem,calc(100dvh-5rem))] overflow-y-auto ${DROPDOWN_WIDTH} border border-moonlight bg-eclipse p-4 text-left text-sm text-moonlight outline-none`}
           >
             <p className="font-medium uppercase tracking-widest text-moonlight/70">
+              This PC
+            </p>
+            <p className="mt-2 text-moonlight/70">
+              Host streaming (tray) lets other machines on your Tailscale
+              network control this desktop. Pause it from the tray when you do
+              not want that.
+            </p>
+            <p className="mt-2 text-moonlight/70">
+              Host admin is the local Sunshine page (username eclipse). Copy
+              the Web UI password from this panel if you need it; Connect does
+              not use that password.
+            </p>
+            <p className="mt-4 font-medium uppercase tracking-widest text-moonlight/70">
+              Host certificates
+            </p>
+            <p className="mt-2 text-moonlight/70">
+              If Connect warns that a host certificate changed, trust it only
+              after a reinstall of Eclipse on that PC. App updates do not
+              rotate the certificate.
+            </p>
+            <p className="mt-4 font-medium uppercase tracking-widest text-moonlight/70">
               Stream shortcuts
             </p>
             <p className="mt-2 text-moonlight/70">

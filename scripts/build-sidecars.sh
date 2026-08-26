@@ -71,18 +71,36 @@ if [[ ! -f "${SUNSHINE_SRC}/.git" && ! -d "${SUNSHINE_SRC}/.git" ]]; then
   git -C "${ROOT}" submodule update --init --recursive
 fi
 
+apply_one_patch() {
+  local repo="$1"
+  local patch="$2"
+  local name
+  name="$(basename "${patch}")"
+  if git -C "${repo}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
+    echo "Already applied ${name}"
+    return 0
+  fi
+  echo "==> Applying ${name}"
+  if git -C "${repo}" apply --whitespace=nowarn "${patch}"; then
+    return 0
+  fi
+  # Later patches can overlap earlier ones, so reverse --check of the
+  # earlier patch fails even though the tree already contains it.
+  if ! git -C "${repo}" apply --check --whitespace=nowarn "${patch}" >/dev/null 2>&1; then
+    echo "Already applied ${name} (later patches overlap)"
+    return 0
+  fi
+  echo "git apply failed for ${name}" >&2
+  return 1
+}
+
 apply_sunshine_patches() {
   local patch
   shopt -s nullglob
   local found=0
   for patch in "${ROOT}/patches/sunshine-"*.patch; do
     found=1
-    if git -C "${SUNSHINE_SRC}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
-      echo "Already applied $(basename "${patch}")"
-      continue
-    fi
-    echo "==> Applying $(basename "${patch}")"
-    git -C "${SUNSHINE_SRC}" apply --whitespace=nowarn "${patch}"
+    apply_one_patch "${SUNSHINE_SRC}" "${patch}"
   done
   if [[ "${found}" -eq 0 ]]; then
     echo "No patches/sunshine-*.patch files found" >&2
@@ -96,12 +114,7 @@ apply_moonlight_patches() {
   local found=0
   for patch in "${ROOT}/patches/moonlight-"*.patch; do
     found=1
-    if git -C "${MOONLIGHT_SRC}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
-      echo "Already applied $(basename "${patch}")"
-      continue
-    fi
-    echo "==> Applying $(basename "${patch}")"
-    git -C "${MOONLIGHT_SRC}" apply --whitespace=nowarn "${patch}"
+    apply_one_patch "${MOONLIGHT_SRC}" "${patch}"
   done
   if [[ "${found}" -eq 0 ]]; then
     echo "No patches/moonlight-*.patch files found" >&2
@@ -141,6 +154,7 @@ cmake -S "${SUNSHINE_SRC}" -B "${BUILD_SUN}" -G Ninja \
   -DBUILD_DOCS=OFF \
   -DBUILD_TESTS=OFF \
   -DBUILD_WERROR=OFF \
+  -DSUNSHINE_ENABLE_TRAY=OFF \
   -DSUNSHINE_ENABLE_CUDA="${USE_CUDA}" \
   -DCUDA_FAIL_ON_MISSING=OFF \
   -DUDEV_RULES_INSTALL_DIR="${PREFIX}/lib/udev/rules.d" \
@@ -165,6 +179,16 @@ install -m 755 "${SUN_BIN}" "${BIN_DIR}/sunshine-${TRIPLE}"
 if [[ -d "${PREFIX}/share/sunshine" ]]; then
   rsync -a --delete "${PREFIX}/share/sunshine/" "${ASSET_DIR}/"
 fi
+if [[ -f "${ROOT}/src-tauri/icons/sunshine.svg" ]]; then
+  for dest in "${ASSET_DIR}" "${PREFIX}/share/sunshine"; do
+    if [[ -d "${dest}/web/images" ]]; then
+      cp "${ROOT}/src-tauri/icons/sunshine.svg" "${dest}/web/images/logo-sunshine.svg"
+      if [[ -f "${ROOT}/src-tauri/icons/sunshine.ico" ]]; then
+        cp "${ROOT}/src-tauri/icons/sunshine.ico" "${dest}/web/images/sunshine.ico"
+      fi
+    fi
+  done
+fi
 echo "Installed ${BIN_DIR}/sunshine-${TRIPLE}"
 
 echo "==> Building Moonlight"
@@ -175,6 +199,9 @@ if [[ ! -f "${ROOT}/assets/fonts/Remboy-Regular.ttf" || ! -f "${ROOT}/assets/fon
 fi
 cp "${ROOT}/assets/fonts/Remboy-Regular.ttf" "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" \
   "${MOONLIGHT_SRC}/app/res/eclipse/"
+if [[ -f "${ROOT}/src-tauri/icons/moonlight.ico" ]]; then
+  cp "${ROOT}/src-tauri/icons/moonlight.ico" "${MOONLIGHT_SRC}/app/moonlight.ico"
+fi
 pushd "${BUILD_MOON}" >/dev/null
 qmake6 "${MOONLIGHT_SRC}/moonlight-qt.pro" CONFIG+=release
 make -j"$(nproc)"

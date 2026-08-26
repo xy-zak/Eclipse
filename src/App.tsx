@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "./components/Button";
+import { CertTrustDialog, parseTlsCertChangedHost } from "./components/CertTrustDialog";
 import { ClientPanel, type ClientLink } from "./components/ClientPanel";
 import { HostPanel } from "./components/HostPanel";
 import { InfoPopover } from "./components/InfoPopover";
@@ -65,6 +66,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [refreshPulse, setRefreshPulse] = useState(0);
   const [connectingIp, setConnectingIp] = useState<string | null>(null);
+  const [certPromptIp, setCertPromptIp] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
   const traffic = useRef<{ t: number; bytes: number } | null>(null);
@@ -165,12 +167,20 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [session?.connected, session?.ip]);
 
-  const connect = (ip: string) => {
+  const connect = (ip: string, trustNewCert = false) => {
     setError(null);
+    setCertPromptIp(null);
     setConnectingIp(ip);
-    invoke("connect", { ip })
+    invoke("connect", { ip, trustNewCert })
       .then(() => invoke<SessionStatus>("session_status").then(setSession))
-      .catch((err: unknown) => setError(String(err)))
+      .catch((err: unknown) => {
+        const changed = parseTlsCertChangedHost(err);
+        if (changed) {
+          setCertPromptIp(changed);
+          return;
+        }
+        setError(String(err));
+      })
       .finally(() => setConnectingIp(null));
   };
 
@@ -196,6 +206,22 @@ export default function App() {
           .catch(() => setInbound(null));
       })
       .catch((err: unknown) => setError(String(err)));
+  };
+
+  const openHostAdmin = () => {
+    setError(null);
+    invoke("open_host_admin").catch((err: unknown) => setError(String(err)));
+  };
+
+  const copyWebUiPassword = async () => {
+    setError(null);
+    try {
+      const pass = await invoke<string>("web_ui_password");
+      await navigator.clipboard.writeText(pass);
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
   };
 
   const setPrefs = (prefs: StreamPrefs) => {
@@ -263,9 +289,12 @@ export default function App() {
             local={discovery?.local ?? null}
             tailscaleOnline={Boolean(discovery?.local?.tailscaleOnline)}
             eclipseOnline={sunshineReady}
+            sunshinePresent={Boolean(status?.sunshinePresent)}
             inbound={inboundLink}
             controlling={controllingLink}
             onForceDisconnect={forceDisconnectInbound}
+            onOpenHostAdmin={openHostAdmin}
+            onCopyWebUiPassword={copyWebUiPassword}
           />
         </section>
 
@@ -322,6 +351,7 @@ export default function App() {
               peer.hostOnline &&
               moonlightReady &&
               connectingIp === null &&
+              certPromptIp === null &&
               !session?.connected &&
               inbound === null;
             return (
@@ -351,6 +381,16 @@ export default function App() {
         </section>
         </div>
       </main>
+      {certPromptIp ? (
+        <CertTrustDialog
+          ip={certPromptIp}
+          hostname={
+            peers.find((peer) => peer.ip === certPromptIp)?.hostname ?? null
+          }
+          onCancel={() => setCertPromptIp(null)}
+          onTrust={() => connect(certPromptIp, true)}
+        />
+      ) : null}
     </div>
   );
 }

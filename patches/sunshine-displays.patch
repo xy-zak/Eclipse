@@ -1,3 +1,7 @@
+Subject: sunshine-displays
+Why: GET /api/displays and displayIndex -> host output_name for per-display capture.
+Depends-on: vendor/PINS sunshine; apply before sunshine-sessions.patch
+
 diff --git i/src/confighttp.cpp w/src/confighttp.cpp
 index eee5677b..b4de403c 100644
 --- i/src/confighttp.cpp

@@ -1,3 +1,7 @@
+Subject: sunshine-sessions
+Why: GET /api/sessions and terminate RTSP on POST /api/apps/close.
+Depends-on: vendor/PINS sunshine; sunshine-displays.patch (shared confighttp.cpp / rtsp)
+
 diff --git i/src/confighttp.cpp w/src/confighttp.cpp
 index b4de403c..67fb2315 100644
 --- i/src/confighttp.cpp

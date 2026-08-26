@@ -5,8 +5,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRANSCRIPT="${TMPDIR:-/tmp}/eclipse-video-smoke.log"
-UI_USER="eclipse"
-UI_PASS="eclipse"
 UI_PORT=47990
 RTSP_PORT=48010
 STREAM_SECS="${ECLIPSE_VIDEO_SMOKE_SECS:-10}"
@@ -77,7 +75,7 @@ tcp_open() {
 http_code() {
   local code
   code="$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 3 \
-    -u "${UI_USER}:${UI_PASS}" "$1" 2>/dev/null || true)"
+    "$1" 2>/dev/null || true)"
   [[ "${code}" =~ ^[0-9]{3}$ ]] && printf '%s\n' "${code}" || printf '000\n'
 }
 
@@ -248,7 +246,7 @@ list_has_desktop() {
 submit_pin() {
   local code
   code="$(curl -k -s -o /tmp/eclipse-pin-smoke.json -w '%{http_code}' --max-time 5 \
-    -u "${UI_USER}:${UI_PASS}" -H 'Content-Type: application/json' \
+    -H 'Content-Type: application/json' \
     -d "{\"pin\":\"$2\",\"name\":\"Eclipse\"}" \
     "https://$1:${UI_PORT}/api/pin" 2>>"${TRANSCRIPT}" || true)"
   [[ "${code}" =~ ^[0-9]{3}$ ]] && printf '%s\n' "${code}" || printf '000\n'
@@ -270,7 +268,7 @@ try_pair() {
     code="$(submit_pin "${ip}" "${pin}")"
     if [[ "${code}" == "401" ]]; then
       stop_pid "${pair_pid}"
-      die "PIN POST 401: host uses a custom Sunshine password (not eclipse/eclipse)."
+      die "PIN POST 401: host sidecar is missing Eclipse's CGNAT pairing patch. Rebuild sidecars on the host."
     fi
     kill -0 "${pair_pid}" 2>/dev/null || break
     sleep "${PIN_INTERVAL}"

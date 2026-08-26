@@ -144,9 +144,21 @@ src-tauri/resources/moonlight-runtime/              # Windows Qt/SDL/FFmpeg (git
 
 Example Linux triple: `x86_64-unknown-linux-gnu`. Tauri `externalBin` is `binaries/sunshine` and `binaries/moonlight`; the build system appends the triple. `cargo` / `tauri dev` fail with a missing-file error until these exist.
 
-Sunshine is installed into a local prefix `src-tauri/resources/sunshine-prefix/` (gitignored) so asset paths do not point at `/usr`. CMake is passed `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside that prefix. Upstream `FindUdev.cmake` otherwise overwrites those dirs from pkg-config (`/usr/lib/udev`); [`patches/sunshine-udev-prefix.patch`](../patches/sunshine-udev-prefix.patch) plus a rewrite of `cmake_install.cmake` keep install inside `PREFIX`. Before configure, both sidecar scripts apply `patches/sunshine-*.patch`.
+Sunshine is installed into a local prefix `src-tauri/resources/sunshine-prefix/` (gitignored) so asset paths do not point at `/usr`. CMake is passed `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside that prefix. Upstream `FindUdev.cmake` otherwise overwrites those dirs from pkg-config (`/usr/lib/udev`); [`patches/sunshine-udev-prefix.patch`](../patches/sunshine-udev-prefix.patch) plus a rewrite of `cmake_install.cmake` keep install inside `PREFIX`. Before configure, both sidecar scripts apply `patches/sunshine-*.patch` and `patches/moonlight-*.patch` (see [`patches/README.md`](../patches/README.md)).
 
-Rebuild sidecars after pulling engine submodule updates, after changing `ECLIPSE_CUDA`, or to pick up that EGL patch.
+Rebuild sidecars after pulling engine submodule updates, after changing `ECLIPSE_CUDA`, or after changing a patch. TTF fonts are copied from `assets/fonts/` into Moonlight `app/res/eclipse/` at build time; they are not in the patch files.
+
+#### Sidecar patches
+
+Series, apply order, and bump SOP: [`patches/README.md`](../patches/README.md). Refresh a dirty vendor tree with `./scripts/refresh-sidecar-patches.sh` (Windows: `.\scripts\refresh-sidecar-patches.ps1`). CI runs `./scripts/check-sidecar-patches.sh` so a patch that no longer applies on the pin fails before a full sidecar compile.
+
+Windows notes that are easy to trip over:
+
+- SCM service name **must** stay `SunshineService` (hardcoded in `vendor/sunshine/tools/sunshinesvc.cpp`). Do not install official Sunshine next to Eclipse.
+- `build-sidecars.ps1` rewrites the Sunshine PE subsystem to WINDOWS so the host does not flash a console.
+- `src-tauri/resources/moonlight-runtime/` is Windows-only (`tauri.windows.conf.json` + `windeployqt`). Linux packages do not bundle it.
+
+Linux packages share [`packaging/linux/host-setup.sh`](../packaging/linux/host-setup.sh) (`postinst.sh` and Arch `eclipse.install` both call it).
 
 ### Run the control plane
 
@@ -193,6 +205,7 @@ Linux packages install udev rules, `setcap` the Sunshine sidecar, and add logged
 Eclipse/
   docs/                         # this guide, user guide, architecture spec
   packaging/                    # deb/rpm maintainer scripts, Arch PKGBUILD, NSIS hooks
+  patches/                      # sidecar series; see patches/README.md
   scripts/                      # bootstrap, setup, sidecar build, package.sh / package.ps1
   src/                          # React + Vite + Tailwind
   src-tauri/
@@ -203,8 +216,9 @@ Eclipse/
     src/
       lib.rs                    # Tauri setup; sidecar_status, list_peers, connect
       sidecar.rs                # Engine adapter (resolve / spawn / health / --creds)
+      hostconf.rs               # sunshine.conf merge, CGNAT checks, Web UI creds, TLS pins
       discovery.rs              # Tailscale peers + Sunshine TCP probe
-      pairing.rs                # POST /api/pin; GET /api/displays; GET /api/sessions; host log/RTSP preflight
+      pairing.rs                # POST /api/pin; GET /api/displays; GET /api/sessions; RTSP preflight
       display.rs                # local monitors + integer-scale table
       session.rs                # Moonlight list / pair / stream windows
     tauri.conf.json
@@ -213,7 +227,7 @@ Eclipse/
   vendor/moonlight-qt/          # submodule
 ```
 
-Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `inbound_status` → `{ ip }` when this PC is being streamed to; `force_disconnect_inbound` → POST `/api/apps/close` on localhost; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream --resolution WxH --video-codec H.264 … Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. On Windows, Connect also copies `resources/moonlight-runtime` beside `moonlight.exe` so Qt/SDL/FFmpeg DLLs load. If Sunshine has no Web UI credentials, Eclipse runs `sunshine --creds eclipse eclipse` once. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
+Rust commands: `sidecar_status` → `{ sunshinePresent, moonlightPresent, sunshineRunning, hostTriple }`; `list_peers` → `{ peers, tailscaleOk, message }`; `inbound_status` → `{ ip }` when this PC is being streamed to; `force_disconnect_inbound` → POST `/api/apps/close` on localhost; `connect` → `moonlight list` / `pair --pin` + POST `/api/pin` / `stream --resolution WxH --video-codec H.264 … Desktop`. Sunshine is started only via `Engine` + `std::process::Command`. Before spawn, Eclipse copies `resources/sunshine` to `{exe_dir}/share/sunshine` and sets cwd to the binary’s parent — Windows Sunshine is compiled with that relative path and does not honor `SUNSHINE_ASSETS_DIR` at runtime. On Windows, Connect also copies `resources/moonlight-runtime` beside `moonlight.exe` so Qt/SDL/FFmpeg DLLs load. If Sunshine has no Web UI credentials (or still has the old `eclipse`/`eclipse` pair), Eclipse runs `sunshine --creds eclipse <random>` and writes `web-ui-password` next to `sunshine_state.json`. Resolution order: file named `sunshine` beside the debug exe, else `src-tauri/binaries/sunshine-<HOST_TRIPLE>`.
 
 Adapter unit tests: `cd src-tauri && cargo test --lib`
 
@@ -249,8 +263,9 @@ Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes:
 | Windows `https://localhost:47990` empty / `netstat` has no 47990 | Sunshine exited on first start because `share/sunshine/apps.json` was missing beside the exe. Restart Eclipse after a sidecar rebuild so `sidecar.rs` stages that layout. |
 | Windows Connect: PIN timeout / Moonlight never appears | `moonlight.exe` needs Qt/SDL/FFmpeg DLLs next to it. Re-run `.\scripts\build-sidecars.ps1` so `windeployqt` fills `src-tauri/resources/moonlight-runtime/`. |
 | `list_peers` / Peers error | `tailscale` must be on `PATH` and logged in (`tailscale status --json`). |
-| Connect 401 / custom password | Host Sunshine already had a Web UI password; Eclipse does not overwrite it. |
-| Connect hangs then errors on PIN | Host Sunshine must be running (package service or source child); Moonlight pair must reach GameStream ports over Tailscale. |
+| Connect 401 on `/api/pin` | Host sidecar lacks `patches/sunshine-cgnat-pair.patch`. Rebuild sidecars on that PC. |
+| Connect prompts to trust a host certificate | Expected after a full reinstall on that host (new Sunshine self-signed cert). **Trust this Host** replaces the pin. App updates do not rotate the cert. |
+| Connect hangs then errors on PIN | Host Sunshine must be running (package service or source child); Moonlight pair must reach GameStream ports over Tailscale (`100.64.0.0/10`). |
 | Windows Connect PIN timeout while Linux→Windows works | Windows Moonlight must add Tailscale IPv4 hosts via `QHostAddress` (not `QUrl`). Rebuild Moonlight with `.\scripts\build-sidecars.ps1` so `nmake` runs inside `vcvars64`. Also confirm `moonlight-runtime\platforms\qwindows.dll` is packaged. |
 | Moonlight “No video received” / UDP 47998 | See [Video.md](Video.md). Check host Sunshine for `Couldn't bind RTSP server to port [48010]`, `Couldn't import RGB Image: 00003009`, or capture init failure. |
 | Moonlight 503 / KMS `CAP_SYS_ADMIN` | `capture = kms` without setcap. `./scripts/linux-host-perms.sh` or `--reset-capture`. |
@@ -260,4 +275,3 @@ Windows video smoke: `.\scripts\smoke-video.ps1 loopback`. Capture/encode notes:
 ## Next product work (not done)
 
 - GitHub Actions installer matrix and GitHub Releases (after local packages are confirmed)
-- Optional prompt when the host uses a custom Sunshine password

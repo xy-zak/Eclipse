@@ -7,15 +7,17 @@
 !macro NSIS_HOOK_POSTINSTALL
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream TCP (in)"'
   Pop $0
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream TCP (in)" dir=in action=allow protocol=TCP localport=47984-47990,48010 profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream TCP (in)" dir=in action=allow protocol=TCP localport=47984-47990,48010 remoteip=100.64.0.0/10 profile=any'
   Pop $0
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Eclipse GameStream UDP (in)"'
   Pop $0
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream UDP (in)" dir=in action=allow protocol=UDP localport=47998-48010 profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Eclipse GameStream UDP (in)" dir=in action=allow protocol=UDP localport=47998-48010 remoteip=100.64.0.0/10 profile=any'
   Pop $0
 
-  ; Recreate so upgrades pick up a new sunshinesvc.exe. SCM name must stay
-  ; SunshineService to match vendor/sunshine/tools/sunshinesvc.cpp.
+; Recreate so upgrades pick up a new sunshinesvc.exe. SCM name must stay
+; SunshineService (hardcoded in vendor/sunshine/tools/sunshinesvc.cpp).
+; Do not install official Sunshine alongside Eclipse. sunshinesvc blocks
+; idle sleep while Sunshine.exe is running; lid-close still sleeps.
   nsExec::ExecToLog 'net stop SunshineService'
   Pop $0
   nsExec::ExecToLog 'sc delete SunshineService'
@@ -28,7 +30,7 @@
   nsExec::ExecToLog 'sc failure SunshineService reset= 86400 actions= restart/5000/restart/5000/restart/5000'
   Pop $0
   SetOutPath "$INSTDIR"
-  nsExec::ExecToLog '"$INSTDIR\sunshine.exe" --creds eclipse eclipse'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\seed-host.ps1" -InstallDir "$INSTDIR"'
   Pop $0
   nsExec::ExecToLog 'net start SunshineService'
   Pop $0

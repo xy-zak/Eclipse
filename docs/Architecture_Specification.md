@@ -161,7 +161,7 @@ CUDA is an optional *build* feature for Sunshine on NVIDIA hosts (`ECLIPSE_CUDA=
 
 The application bundles Sunshine and Moonlight using Tauri's `externalBin` configuration (`binaries/sunshine`, `binaries/moonlight` plus the Rust host triple). Assets for Sunshine are copied to `src-tauri/resources/sunshine`. Compiled sidecars are gitignored; developers compile them with `scripts/build-sidecars.sh` (or `.ps1`).
 
-Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tauri/src/sidecar.rs`): binary name, asset env, health port, start/stop. Tailscale listing lives in `discovery.rs`. PIN HTTP is in `pairing.rs`, Moonlight CLI in `session.rs`.
+Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tauri/src/sidecar.rs`): binary name, asset env, health port, start/stop. Tailscale listing lives in `discovery.rs`. PIN HTTP and TLS TOFU are in `pairing.rs` / `hostconf.rs`, Moonlight CLI in `session.rs`.
 
 ### 6.1 Process Lifecycle Management
 
@@ -175,17 +175,17 @@ Rust talks to engines only through `Engine` (`SUNSHINE`, `MOONLIGHT` in `src-tau
 
 ## 7. Desired User Flow & Auto-Connect Architecture
 
-**Implemented.** One-click Connect bypasses typing a GameStream PIN. Sunshine Web UI Basic Auth uses seeded defaults `eclipse` / `eclipse` when the host has no credentials yet (Tailscale is the security boundary). Custom Sunshine passwords are not prompted for; Connect returns an error.
+**Implemented.** One-click Connect bypasses typing a GameStream PIN. Pairing APIs (`POST /api/pin`, `GET /api/displays`, `GET /api/sessions`, `POST /api/apps/close`) accept loopback and Tailscale CGNAT (`100.64.0.0/10`) without the Web UI password. Installers seed a random local Web UI password (username `eclipse`) for https://localhost:47990. GameStream inbound firewall rules allow only `100.64.0.0/10`. Stream encryption is mandatory (`lan_encryption_mode = 2`, `wan_encryption_mode = 2`).
 
 **The Workflow:**
 
 1. **Select Target:** User clicks **Connect** on a peer row (IP: `100.x.x.x`) in the React UI.
 2. **Already paired?** Rust runs `moonlight list <ip>`. If `Desktop` is listed, skip to launch.
-3. **Client PIN:** Rust generates a 4-digit PIN and spawns `moonlight pair <ip> --pin NNNN` so the GameStream handshake exists on the host.
+3. **Client PIN:** Rust generates a 4-digit CSPRNG PIN and spawns `moonlight pair <ip> --pin NNNN` so the GameStream handshake exists on the host.
 4. **The API Handshake (Automated Pairing):**
    * Tauri `POST`s `https://{ip}:47990/api/pin` with JSON `{"pin":"NNNN","name":"Eclipse"}` (Sunshine's field is `name`).
-   * TLS accepts Sunshine's self-signed certificate. CSRF is skipped (no `Origin`/`Referer`).
-   * Basic Auth is `eclipse`:`eclipse`. The POST is retried until Sunshine reports `status: true` (the handshake must already be open).
+   * TLS uses TOFU pinning per host (first Connect stores SHA-256 of the Sunshine cert). If the cert later changes, Connect prompts **Trust this Host** and replaces the pin. CSRF is skipped (no `Origin`/`Referer`).
+   * No Basic Auth on this path from CGNAT/loopback. The POST is retried until Sunshine reports `status: true` (the handshake must already be open).
 5. **Launch Stream:** Tauri executes `moonlight stream --resolution WxH --fps 60 --video-codec H.264 --no-hdr --packet-size 1024 --absolute-mouse --display-mode windowed --host-display N <ip> Desktop`. Moonlight connects without a PIN screen.
 
 ```mermaid
@@ -205,7 +205,7 @@ sequenceDiagram
     Session->>Moon: pair peerIp --pin NNNN
     loop retry until pin accepted
       Session->>Pair: submit pin
-      Pair->>Sun: POST /api/pin BasicAuth
+      Pair->>Sun: POST /api/pin (CGNAT/loopback, no Basic Auth)
       Sun-->>Pair: status
     end
     Session->>Moon: kill pair
@@ -264,16 +264,17 @@ flowchart TD
 
 * **Compiler:** MSVC (Moonlight) + MSYS2 UCRT64 (Sunshine), same as developer bootstrap.
 * **Output:** `.\scripts\package.ps1` runs `tauri build --bundles nsis` → `Eclipse_*_x64-setup.exe`.
-* **Host service:** NSIS installs `tools/sunshinesvc.exe` as Windows service `SunshineService` (display name Eclipse Host, `delayed-auto`). Authenticated Users may start/stop it (ACL). HKLM Run starts `eclipse.exe --tray` at login. Uninstall stops the service and removes the Run key.
+* **Host service:** NSIS installs `tools/sunshinesvc.exe` as Windows service `SunshineService` (display name Eclipse Host, `delayed-auto`). The SCM name must stay `SunshineService` (hardcoded in `sunshinesvc.cpp`). Authenticated Users may start/stop it (ACL). HKLM Run starts `eclipse.exe --tray` at login. Uninstall stops the service and removes the Run key. While Sunshine.exe is running, `sunshinesvc` holds `PowerRequestSystemRequired` (idle timeout only; lid-close and the power button still sleep) and restarts the child after resume.
 * **Permissions:** The installer is per-machine so it can add GameStream firewall rules and the host service. The running GUI does not request `requireAdministrator`.
+* **Moonlight runtime:** Qt/SDL/FFmpeg DLLs from `windeployqt` ship only on Windows (`tauri.windows.conf.json` → `moonlight-runtime/`).
 
 ### 8.3 Linux Packaging (`.deb` / `.rpm` / Arch)
 
 * **Build host:** Debian/Ubuntu 24.04 for `.deb`, Fedora for `.rpm`, Arch for `.pkg.tar.zst`. Linkage is distro-specific.
 * **Dependencies:** `src-tauri/tauri.conf.json` lists deb and rpm depends. Arch depends live in `packaging/arch/PKGBUILD`. CUDA toolkit is never a package dependency; NVIDIA **driver** is optional (`nvidia-utils` optdepend on Arch).
 * **Output:** `./scripts/package.sh` (deb / rpm / makepkg).
-* **Host service:** Packages install `eclipse-host.service` (`WantedBy=multi-user.target`) and `modules-load.d` for `uinput`/`uhid`. Config lives in `/etc/eclipse/sunshine`. Capture stays on **auto** (KMS fallback before login). A polkit helper (`eclipse-hostctl`) lets the tray start/stop the unit. `/etc/xdg/autostart/eclipse-tray.desktop` launches `eclipse --tray`.
-* **Permissions:** `packaging/linux/postinst.sh` (and Arch `eclipse.install`) install udev rules, `setcap` Sunshine, add users to `input`, seed Web UI creds, and `systemctl enable --now eclipse-host.service`.
+* **Host service:** Packages install `eclipse-host.service` (`WantedBy=multi-user.target`, `systemd-inhibit --what=idle`) and `modules-load.d` for `uinput`/`uhid`. A `system-sleep` hook restarts the unit after resume. Config lives in `/etc/eclipse/sunshine`. Capture stays on **auto** (KMS fallback before login). A polkit helper (`eclipse-hostctl`) lets the tray start/stop the unit. `/etc/xdg/autostart/eclipse-tray.desktop` launches `eclipse --tray`.
+* **Permissions:** [`packaging/linux/host-setup.sh`](../packaging/linux/host-setup.sh) (deb/rpm `postinst.sh` and Arch `eclipse.install`) install udev rules, `setcap` Sunshine, add users to `input`, seed Web UI creds, and `systemctl enable --now eclipse-host.service`.
 
 ---
 

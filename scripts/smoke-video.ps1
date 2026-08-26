@@ -11,8 +11,6 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Transcript = Join-Path $env:TEMP "eclipse-video-smoke.log"
-$UiUser = "eclipse"
-$UiPass = "eclipse"
 $UiPort = 47990
 $RtspPort = 48010
 $StreamSecs = 10
@@ -74,7 +72,7 @@ function Test-TcpOpen([string]$HostName, [int]$Port) {
 
 function Get-HttpCode([string]$Url) {
     if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return "000" }
-    $code = & curl.exe -k -s -o NUL -w "%{http_code}" --max-time 3 -u "${UiUser}:${UiPass}" $Url 2>$null
+    $code = & curl.exe -k -s -o NUL -w "%{http_code}" --max-time 3 $Url 2>$null
     if ($code -notmatch '^[0-9]{3}$') { return "000" }
     return $code
 }
@@ -242,7 +240,7 @@ function Submit-Pin([string]$Ip, [string]$Pin) {
     $url = "https://${Ip}:${UiPort}/api/pin"
     $pinFile = Join-Path $env:TEMP "eclipse-pin-smoke.json"
     $code = & curl.exe -k -s -o $pinFile -w "%{http_code}" --max-time 5 `
-        -u "${UiUser}:${UiPass}" -H "Content-Type: application/json" `
+        -H "Content-Type: application/json" `
         -d "{`"pin`":`"$Pin`",`"name`":`"Eclipse`"}" $url 2>$null
     if ($code -notmatch '^[0-9]{3}$') { return "000" }
     return $code
@@ -266,7 +264,7 @@ function Invoke-TryPair([string]$Ip, [string]$Pin) {
         $code = Submit-Pin $Ip $Pin
         if ($code -eq "401") {
             Stop-Proc $pair
-            Die "PIN POST 401: host uses a custom Sunshine password (not eclipse/eclipse)."
+            Die "PIN POST 401: host sidecar is missing Eclipse's CGNAT pairing patch. Rebuild sidecars on the host."
         }
         if ($pair.HasExited) { break }
         Start-Sleep -Milliseconds $PinIntervalMs

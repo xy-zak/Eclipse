@@ -4,7 +4,9 @@
       "resources/sunshine": "share/sunshine",
       "resources/moonlight-runtime": "moonlight-runtime",
       "resources/windows/sunshinesvc.exe": "tools/sunshinesvc.exe",
-      "../packaging/windows/grant-host-acl.cmd": "grant-host-acl.cmd"
+      "../packaging/windows/grant-host-acl.cmd": "grant-host-acl.cmd",
+      "../packaging/windows/seed-host.ps1": "seed-host.ps1",
+      "../packaging/sunshine.conf": "sunshine.conf"
     }
   }
 }

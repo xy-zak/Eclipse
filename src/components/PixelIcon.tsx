@@ -8,13 +8,11 @@ import expand from "../assets/icons/expand.svg?raw";
 import exclamation from "../assets/icons/exclamation.svg?raw";
 import minus from "../assets/icons/minus.svg?raw";
 import moonSolid from "../assets/icons/moon-solid.svg?raw";
-import pc from "../assets/icons/pc.svg?raw";
 import sparklesSolid from "../assets/icons/sparkles-solid.svg?raw";
 import spinner from "../assets/icons/spinner.svg?raw";
 import sunSolid from "../assets/icons/sun-solid.svg?raw";
 import times from "../assets/icons/times.svg?raw";
 import timesCircle from "../assets/icons/times-circle.svg?raw";
-import wifi from "../assets/icons/wifi.svg?raw";
 
 const ICONS = {
   "sun-solid": sunSolid,
@@ -28,9 +26,7 @@ const ICONS = {
   expand,
   times,
   cog,
-  pc,
   exclamation,
-  wifi,
   analytics,
   clock,
 } as const;

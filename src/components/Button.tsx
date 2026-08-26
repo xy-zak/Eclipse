@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import { forwardRef, type ButtonHTMLAttributes } from "react";
 
 type Variant = "sunshine" | "moonlight" | "fail" | "ghost";
 
@@ -16,17 +16,16 @@ type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant;
 };
 
-export function Button({
-  variant = "moonlight",
-  className = "",
-  type = "button",
-  ...props
-}: Props) {
+export const Button = forwardRef<HTMLButtonElement, Props>(function Button(
+  { variant = "moonlight", className = "", type = "button", ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       type={type}
       className={`inline-flex items-center justify-center gap-2 border px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed ${VARIANT[variant]} ${className}`}
       {...props}
     />
   );
-}
+});

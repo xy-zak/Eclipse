@@ -177,6 +177,9 @@ fn list_peers_uncached() -> DiscoverySnapshot {
 }
 
 pub fn peer_latency_ms(ip: &str) -> Option<u32> {
+    if !crate::hostconf::is_allowed_peer_ip(ip) {
+        return None;
+    }
     let Some(health) = SUNSHINE.health() else {
         return None;
     };

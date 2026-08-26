@@ -6,9 +6,10 @@
 //! API change does not leak into React.
 
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use crate::sidecar::{probe_tcp, SUNSHINE, SUNSHINE_UI_PASS, SUNSHINE_UI_USER};
+use crate::hostconf::{self, is_allowed_peer_ip};
+use crate::sidecar::{probe_tcp, SUNSHINE};
 
 const PIN_RETRY: Duration = Duration::from_secs(45);
 const PIN_INTERVAL: Duration = Duration::from_millis(300);
@@ -19,10 +20,14 @@ pub const GAMESTREAM_HTTP_PORT: u16 = 47989;
 
 const CLIENT_NAME: &str = "Eclipse";
 
+/// Stable prefix so the UI can offer “Trust this Host” instead of a file-delete hint.
+pub const TLS_CERT_CHANGED_PREFIX: &str = "ECLIPSE_TLS_CERT_CHANGED:";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PinError {
     Unauthorized,
     Unconfigured,
+    TlsCertChanged(String),
     Other(String),
 }
 
@@ -30,14 +35,22 @@ impl PinError {
     pub fn into_message(self) -> String {
         match self {
             PinError::Unauthorized => {
-                "Host Sunshine uses a custom Web UI password. Default eclipse/eclipse was rejected."
+                "Host Sunshine rejected pairing (HTTP 401). Rebuild that PC with this Eclipse version so pairing APIs allow Tailscale CGNAT, or check the host is on the tailnet."
                     .into()
             }
             PinError::Unconfigured => {
                 "Host Sunshine has no Web UI credentials. Open Eclipse on that PC first.".into()
             }
+            PinError::TlsCertChanged(host) => format!("{TLS_CERT_CHANGED_PREFIX}{host}"),
             PinError::Other(msg) => msg,
         }
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            PinError::Unauthorized | PinError::Unconfigured | PinError::TlsCertChanged(_)
+        )
     }
 }
 
@@ -114,11 +127,10 @@ pub fn pin_payload(pin: &str, name: &str) -> serde_json::Value {
 }
 
 pub fn generate_pin() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:04}", (nanos % 10_000) as u32)
+    let mut bytes = [0u8; 2];
+    getrandom::getrandom(&mut bytes).expect("CSPRNG for GameStream PIN");
+    let n = u16::from_le_bytes(bytes) % 10_000;
+    format!("{n:04}")
 }
 
 pub fn client_name() -> &'static str {
@@ -138,6 +150,9 @@ pub fn gamestream_unreachable_message(host: &str) -> String {
 
 /// Fail Connect before spawning Moonlight pair when GameStream HTTP is closed.
 pub fn ensure_gamestream_http(host: &str) -> Result<(), PinError> {
+    if !is_allowed_peer_ip(host) {
+        return Err(PinError::Other(hostconf::peer_ip_rejected_message(host)));
+    }
     if gamestream_http_reachable(host) {
         Ok(())
     } else {
@@ -157,7 +172,7 @@ where
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(err) => {
-                if matches!(err, PinError::Unauthorized | PinError::Unconfigured) {
+                if err.is_fatal() {
                     return Err(err);
                 }
                 last = err;
@@ -173,22 +188,71 @@ where
 fn http_client() -> Result<reqwest::blocking::Client, PinError> {
     reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
+        .tls_info(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(PIN_REQUEST_TIMEOUT)
         .build()
         .map_err(|err| PinError::Other(format!("HTTPS client failed: {err}")))
 }
 
+fn verify_host_cert(
+    host: &str,
+    response: &reqwest::blocking::Response,
+    replace: bool,
+) -> Result<(), PinError> {
+    let Some(info) = response.extensions().get::<reqwest::tls::TlsInfo>() else {
+        return Err(PinError::Other(format!(
+            "No TLS certificate info from {host}."
+        )));
+    };
+    let Some(der) = info.peer_certificate() else {
+        return Err(PinError::Other(format!("No TLS certificate from {host}.")));
+    };
+    let pin = hostconf::sha256_hex(der);
+    match hostconf::load_host_cert_pin(host) {
+        Some(stored) if stored != pin => {
+            if replace {
+                hostconf::store_host_cert_pin(host, &pin);
+                Ok(())
+            } else {
+                Err(PinError::TlsCertChanged(host.to_string()))
+            }
+        }
+        Some(_) => Ok(()),
+        None => {
+            hostconf::store_host_cert_pin(host, &pin);
+            Ok(())
+        }
+    }
+}
+
+/// HTTPS TOFU check (GET `/api/displays`). Run before pair so already-paired hosts still prompt.
+pub fn ensure_host_tls(host: &str, replace_cert: bool) -> Result<(), PinError> {
+    if !is_allowed_peer_ip(host) {
+        return Err(PinError::Other(hostconf::peer_ip_rejected_message(host)));
+    }
+    let client = http_client()?;
+    let response = client
+        .get(displays_url(host))
+        .timeout(PIN_REQUEST_TIMEOUT)
+        .send()
+        .map_err(|err| PinError::Other(format!("Host HTTPS failed: {err}")))?;
+    verify_host_cert(host, &response, replace_cert)
+}
+
 /// POST `/api/pin`. `Ok(true)` means Sunshine accepted the PIN.
 pub fn submit_pin(host: &str, pin: &str, name: &str) -> Result<bool, PinError> {
+    if !is_allowed_peer_ip(host) {
+        return Err(PinError::Other(hostconf::peer_ip_rejected_message(host)));
+    }
     let client = http_client()?;
     let response = client
         .post(pin_url(host))
-        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&pin_payload(pin, name))
         .send()
         .map_err(|err| PinError::Other(format!("PIN POST failed: {err}")))?;
+    verify_host_cert(host, &response, false)?;
 
     let status = response.status();
     if status.as_u16() == 401 {
@@ -222,26 +286,10 @@ pub fn pin_retry_interval() -> Duration {
     PIN_INTERVAL
 }
 
-/// GET `/api/logs`, then probe TCP 48010. Log text can lie about RTSP bind.
+/// Probe TCP 48010 so Connect fails before Moonlight if RTSP is down.
 pub fn ensure_host_video(host: &str) -> Result<(), PinError> {
-    let client = http_client()?;
-    let response = client
-        .get(logs_url(host))
-        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
-        .send()
-        .map_err(|err| PinError::Other(format!("Host log fetch failed: {err}")))?;
-    let status = response.status();
-    if status.as_u16() == 401 {
-        return Err(PinError::Unauthorized);
-    }
-    if !status.is_success() {
-        return Ok(());
-    }
-    let text = response
-        .text()
-        .map_err(|err| PinError::Other(format!("Host log fetch was not text: {err}")))?;
-    if let Some(msg) = host_video_issue(&text) {
-        return Err(PinError::Other(msg.into()));
+    if !is_allowed_peer_ip(host) {
+        return Err(PinError::Other(hostconf::peer_ip_rejected_message(host)));
     }
     if !probe_tcp(host, RTSP_PORT, Duration::from_millis(500)) {
         return Err(PinError::Other(
@@ -253,13 +301,16 @@ pub fn ensure_host_video(host: &str) -> Result<(), PinError> {
 
 /// GET `/api/displays`. Missing endpoint (old Sunshine) yields an empty list.
 pub fn fetch_displays(host: &str) -> Option<Vec<crate::display::DisplayInfo>> {
+    if !is_allowed_peer_ip(host) {
+        return None;
+    }
     let client = http_client().ok()?;
     let response = client
         .get(displays_url(host))
-        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
         .timeout(Duration::from_millis(400))
         .send()
         .ok()?;
+    verify_host_cert(host, &response, false).ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -308,13 +359,16 @@ pub fn close_host_app(host: &str) {
 
 /// POST `/api/apps/close` and surface HTTP failures (used by force-disconnect).
 pub fn close_host_app_result(host: &str) -> Result<(), String> {
+    if !is_allowed_peer_ip(host) {
+        return Err(hostconf::peer_ip_rejected_message(host));
+    }
     let client = http_client().map_err(|err| err.into_message())?;
     let response = client
         .post(apps_close_url(host))
-        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
         .timeout(CLOSE_REQUEST_TIMEOUT)
         .send()
         .map_err(|err| format!("Force disconnect failed: {err}"))?;
+    verify_host_cert(host, &response, false).map_err(|err| err.into_message())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Force disconnect returned {status}."));
@@ -371,13 +425,16 @@ pub fn local_inbound() -> Option<InboundStream> {
 }
 
 fn fetch_session_ips(host: &str) -> Option<Vec<String>> {
+    if !is_allowed_peer_ip(host) {
+        return None;
+    }
     let client = http_client().ok()?;
     let response = client
         .get(sessions_url(host))
-        .basic_auth(SUNSHINE_UI_USER, Some(SUNSHINE_UI_PASS))
         .timeout(SESSION_REQUEST_TIMEOUT)
         .send()
         .ok()?;
+    verify_host_cert(host, &response, false).ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -393,6 +450,20 @@ pub fn force_disconnect_inbound() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_displays_rejects_rfc1918() {
+        assert!(fetch_displays("192.168.1.1").is_none());
+    }
+
+    #[test]
+    fn ensure_host_video_rejects_rfc1918() {
+        let err = ensure_host_video("10.0.0.1").unwrap_err();
+        match err {
+            PinError::Other(msg) => assert!(msg.contains("100.64.0.0/10"), "{msg}"),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
 
     #[test]
     fn pin_url_uses_peer_host_and_sunshine_port() {
@@ -547,6 +618,40 @@ Info: Found H.264 encoder: h264_vaapi [vaapi]
     }
 
     #[test]
+    fn generate_pin_is_not_unix_nanos_modulo() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let time_pin = format!(
+            "{:04}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 10_000
+        );
+        let pins: Vec<String> = (0..40).map(|_| generate_pin()).collect();
+        assert!(
+            pins.iter().any(|p| p != &time_pin),
+            "PIN matched wall-clock nanos % 10000"
+        );
+    }
+
+    #[test]
+    fn submit_pin_rejects_rfc1918_without_http() {
+        let err = submit_pin("192.168.1.1", "1234", "Eclipse").unwrap_err();
+        match err {
+            PinError::Other(msg) => assert!(msg.contains("100.64.0.0/10"), "{msg}"),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_payload_has_no_credentials() {
+        let body = pin_payload("1234", "Eclipse");
+        assert!(body.get("username").is_none());
+        assert!(body.get("password").is_none());
+    }
+
+    #[test]
     fn retry_until_ok_succeeds_on_later_true() {
         let mut n = 0;
         retry_until_ok(
@@ -559,6 +664,23 @@ Info: Found H.264 encoder: h264_vaapi [vaapi]
         )
         .unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn tls_cert_changed_message_is_parseable() {
+        let msg = PinError::TlsCertChanged("100.64.0.9".into()).into_message();
+        assert_eq!(msg, format!("{TLS_CERT_CHANGED_PREFIX}100.64.0.9"));
+    }
+
+    #[test]
+    fn retry_until_ok_stops_on_tls_cert_changed() {
+        let err = retry_until_ok(
+            || Err(PinError::TlsCertChanged("100.64.0.9".into())),
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert_eq!(err, PinError::TlsCertChanged("100.64.0.9".into()));
     }
 
     #[test]

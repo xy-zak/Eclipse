@@ -209,6 +209,48 @@ groupadd -f input
 usermod -aG input "${target}"
 echo "User ${target} is in group input (new desktop session required)."
 echo
+
+HOST_SETUP="${ROOT}/packaging/linux/host-setup.sh"
+if [[ -f "${HOST_SETUP}" ]]; then
+  # shellcheck disable=SC1091
+  . "${HOST_SETUP}"
+  eclipse_host_open_firewall
+  user_conf="$(sunshine_conf)"
+  user_dir="$(dirname "${user_conf}")"
+  mkdir -p "${user_dir}"
+  eclipse_host_merge_conf "${user_conf}" "${ROOT}/packaging/sunshine.conf"
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    chown -R "${SUDO_USER}:${SUDO_USER}" "${user_dir}" 2>/dev/null || true
+  fi
+  echo "Merged host encryption defaults into ${user_conf}."
+  echo "GameStream inbound (if ufw/firewalld is active) is limited to 100.64.0.0/10."
+fi
+
+desktop_src="${ROOT}/packaging/linux/com.eclipse.moonlight.desktop"
+icon_src="${ROOT}/src-tauri/icons/moonlight.svg"
+if [[ -f "${desktop_src}" && -f "${icon_src}" ]]; then
+  user_home="$(getent passwd "${target}" | cut -d: -f6)"
+  if [[ -n "${user_home}" ]]; then
+    data_home="${user_home}/.local/share"
+    install -Dm644 "${desktop_src}" \
+      "${data_home}/applications/com.eclipse.moonlight.desktop"
+    install -Dm644 "${icon_src}" \
+      "${data_home}/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg"
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+      chown "${SUDO_USER}:${SUDO_USER}" \
+        "${data_home}/applications/com.eclipse.moonlight.desktop" \
+        "${data_home}/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg" \
+        2>/dev/null || true
+    else
+      chown "${target}:${target}" \
+        "${data_home}/applications/com.eclipse.moonlight.desktop" \
+        "${data_home}/icons/hicolor/scalable/apps/com.eclipse.moonlight.svg" \
+        2>/dev/null || true
+    fi
+    echo "Installed Moonlight stream window icon for ${target} (com.eclipse.moonlight)."
+  fi
+fi
+
 echo "KMS capture still needs these caps. Prefer auto/wlr after rebuilding sidecars"
 echo "with the EGL fallback; use --reset-capture if sunshine.conf forces kms."
 echo "Re-run this script after a sidecar rebuild or a fresh tauri copy of sunshine."

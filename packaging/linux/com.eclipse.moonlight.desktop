@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Eclipse Stream
+Comment=Eclipse Moonlight stream window
+Exec=moonlight
+Icon=com.eclipse.moonlight
+StartupWMClass=com.eclipse.moonlight
+NoDisplay=true
+Terminal=false
+Categories=Network;Utility;

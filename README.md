@@ -12,6 +12,7 @@ Peer-to-peer remote desktop. Every install is a **symmetric node**: Tauri + Reac
 - **[docs/User_Guide.md](docs/User_Guide.md)** — runtime requirements and how to run the app
 - **[docs/Development.md](docs/Development.md)** — toolchain, submodules, sidecar build, troubleshooting
 - **[docs/Architecture_Specification.md](docs/Architecture_Specification.md)** — product architecture (what we are building)
+- **[patches/README.md](patches/README.md)** — Sunshine/Moonlight patch series and how to rebase them
 
 ### Developer quick start
 

@@ -1,0 +1,10 @@
+#!/bin/sh
+# systemd-sleep hook: restart the host after resume so capture and the NIC recover.
+# Lid-close and the power button still sleep; this only runs on wake.
+set -e
+
+[ "${1:-}" = post ] || exit 0
+[ -d /run/systemd/system ] || exit 0
+
+systemctl try-restart eclipse-host.service >/dev/null 2>&1 || true
+exit 0

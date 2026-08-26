@@ -305,8 +305,8 @@ impl SessionProcess {
         self.inner.open_all_displays()
     }
 
-    pub fn connect(&self, peer_ip: &str) -> Result<(), String> {
-        self.inner.connect(peer_ip)
+    pub fn connect(&self, peer_ip: &str, trust_new_cert: bool) -> Result<(), String> {
+        self.inner.connect(peer_ip, trust_new_cert)
     }
 }
 
@@ -508,10 +508,13 @@ impl SessionInner {
         Ok(())
     }
 
-    fn connect(&self, peer_ip: &str) -> Result<(), String> {
+    fn connect(&self, peer_ip: &str, trust_new_cert: bool) -> Result<(), String> {
         let ip = peer_ip.trim();
         if ip.is_empty() {
             return Err("No peer IP.".into());
+        }
+        if !crate::hostconf::is_allowed_peer_ip(ip) {
+            return Err(crate::hostconf::peer_ip_rejected_message(ip));
         }
         if !MOONLIGHT.is_present() {
             return Err("Moonlight sidecar is not built.".into());
@@ -526,6 +529,7 @@ impl SessionInner {
         self.stop();
 
         pairing::ensure_gamestream_http(ip).map_err(|err| err.into_message())?;
+        pairing::ensure_host_tls(ip, trust_new_cert).map_err(|err| err.into_message())?;
         // `moonlight list` waits up to 30s when the host is missing from Moonlight's
         // cache. `pair` already succeeds immediately if the host is paired.
         self.pair_host(ip)?;
@@ -640,12 +644,7 @@ impl SessionInner {
             match pairing::submit_pin(ip, &pin, pairing::client_name()) {
                 Ok(true) => break,
                 Ok(false) => {}
-                Err(err)
-                    if matches!(
-                        err,
-                        pairing::PinError::Unauthorized | pairing::PinError::Unconfigured
-                    ) =>
-                {
+                Err(err) if err.is_fatal() => {
                     self.kill_pair();
                     return Err(err.into_message());
                 }
@@ -918,8 +917,15 @@ no Qt platform plugin
     #[test]
     fn connect_reports_empty_ip() {
         let session = SessionProcess::new();
-        let err = session.connect("  ").unwrap_err();
+        let err = session.connect("  ", false).unwrap_err();
         assert_eq!(err, "No peer IP.");
+    }
+
+    #[test]
+    fn connect_rejects_rfc1918() {
+        let session = SessionProcess::new();
+        let err = session.connect("192.168.1.1", false).unwrap_err();
+        assert!(err.contains("100.64.0.0/10"), "{err}");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import type { DisplayInfo, LocalNode } from "../types";
 import { Button } from "./Button";
 import { InfoRow, Panel } from "./Panel";
@@ -13,9 +14,12 @@ type Props = {
   local: LocalNode | null;
   tailscaleOnline: boolean;
   eclipseOnline: boolean;
+  sunshinePresent: boolean;
   inbound: ClientLink | null;
   controlling: ClientLink | null;
   onForceDisconnect: () => void;
+  onOpenHostAdmin: () => void;
+  onCopyWebUiPassword: () => Promise<void>;
 };
 
 function dash(value: string | number | null | undefined): string {
@@ -40,27 +44,34 @@ function peerId(link: ClientLink): string {
   return link.hostname ? `${link.hostname} @ ${link.ip}` : link.ip;
 }
 
-function statusText(
-  inbound: ClientLink | null,
-  controlling: ClientLink | null,
-): string {
-  if (inbound) {
-    return `Currently streaming to Client ${peerId(inbound)}`;
-  }
-  if (controlling) {
-    return `Currently controlling Host ${peerId(controlling)}`;
-  }
-  return "Idle";
-}
-
 export function ClientPanel({
   local,
   tailscaleOnline,
   eclipseOnline,
+  sunshinePresent,
   inbound,
   controlling,
   onForceDisconnect,
+  onOpenHostAdmin,
+  onCopyWebUiPassword,
 }: Props) {
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+
+  const copyPassword = () => {
+    void onCopyWebUiPassword()
+      .then(() => {
+        setCopied(true);
+        if (copyTimer.current != null) {
+          window.clearTimeout(copyTimer.current);
+        }
+        copyTimer.current = window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        setCopied(false);
+      });
+  };
+
   return (
     <Panel
       accent="moonlight"
@@ -84,21 +95,50 @@ export function ClientPanel({
             icon={<PixelIcon name="sparkles-solid" size={14} />}
           />
         </div>
-        <div className="mt-3 flex min-w-0 items-start justify-between gap-4 py-1.5 text-sm">
-          <span className="shrink-0 text-moonlight/70">Status</span>
-          <div className="flex min-w-0 flex-col items-end gap-2">
-            <span className="min-w-0 text-right font-medium wrap-break-word">
-              {statusText(inbound, controlling)}
-            </span>
-            {inbound ? (
-              <Button variant="fail" onClick={onForceDisconnect}>
-                <PixelIcon name="times-circle" size={14} />
-                Force disconnect from streaming client
-              </Button>
-            ) : null}
+        <p className="mt-3 text-sm leading-relaxed text-moonlight/70">
+          {eclipseOnline
+            ? "Machines on your Tailscale network can control this desktop while Host streaming is on."
+            : "Host streaming is off. Turn it on from the tray to let this PC be a host."}
+        </p>
+        {inbound ? (
+          <div className="mt-4 border border-fail p-3">
+            <p className="text-sm font-medium wrap-break-word">
+              Streaming to {peerId(inbound)}
+            </p>
+            <Button
+              variant="fail"
+              className="mt-3 w-full"
+              onClick={onForceDisconnect}
+            >
+              <PixelIcon name="times-circle" size={14} />
+              Force disconnect
+            </Button>
           </div>
-        </div>
+        ) : (
+          <div className="mt-3 flex min-w-0 items-start justify-between gap-4 py-1.5 text-sm">
+            <span className="shrink-0 text-moonlight/70">Status</span>
+            <span className="min-w-0 text-right font-medium wrap-break-word">
+              {controlling
+                ? `Currently controlling Host ${peerId(controlling)}`
+                : "Idle"}
+            </span>
+          </div>
+        )}
       </div>
+      {sunshinePresent ? (
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-moonlight pt-4">
+          <Button
+            variant="ghost"
+            disabled={!eclipseOnline}
+            onClick={onOpenHostAdmin}
+          >
+            Open host admin
+          </Button>
+          <Button variant="ghost" onClick={copyPassword}>
+            {copied ? "Copied" : "Copy Web UI password"}
+          </Button>
+        </div>
+      ) : null}
     </Panel>
   );
 }

@@ -1,7 +1,11 @@
-diff --git i/src/platform/linux/graphics.cpp w/src/platform/linux/graphics.cpp
+Subject: sunshine-egl-bad-match
+Why: Retry DMA-BUF EGL import without modifier on EGL_BAD_MATCH (00003009).
+Depends-on: vendor/PINS sunshine
+
+diff --git a/src/platform/linux/graphics.cpp b/src/platform/linux/graphics.cpp
 index 1ef27c71..5f73a3de 100644
---- i/src/platform/linux/graphics.cpp
-+++ w/src/platform/linux/graphics.cpp
+--- a/src/platform/linux/graphics.cpp
++++ b/src/platform/linux/graphics.cpp
 @@ -639,10 +639,31 @@ namespace egl {
     */
    std::optional<rgb_t> import_source(display_t::pointer egl_display, const surface_descriptor_t &xrgb) {

@@ -1,0 +1,610 @@
+Subject: moonlight-01-behavior
+Why: Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, integer-scale fullscreen, splash hold.
+Depends-on: vendor/PINS moonlight-qt; apply before moonlight-02-ui.patch
+
+diff --git a/app/backend/computermanager.cpp b/app/backend/computermanager.cpp
+index 96177da7..7d5e4a77 100644
+--- a/app/backend/computermanager.cpp
++++ b/app/backend/computermanager.cpp
+@@ -6,10 +6,12 @@
+ #include <Limelight.h>
+ #include <QtEndian>
+ 
++#include <QHostAddress>
+ #include <QThread>
+ #include <QThreadPool>
+ #include <QCoreApplication>
+ #include <QRandomGenerator>
++#include <QUrl>
+ 
+ #define SER_HOSTS "hosts"
+ #define SER_HOSTS_BACKUP "hostsbackup"
+@@ -728,15 +730,20 @@ void ComputerManager::stopPollingAsync()
+ 
+ void ComputerManager::addNewHostManually(QString address)
+ {
++    // Tailscale CGNAT (100.x) and other IPv4 literals can fail QUrl parsing
++    // (`moonlight://100.88.1.2` is treated as an invalid URL). IPv6 already
++    // had a fallback; IPv4 must too or pair/list never start the GameStream probe.
++    QHostAddress ip(address);
++    if (ip.protocol() == QAbstractSocket::IPv4Protocol ||
++        ip.protocol() == QAbstractSocket::IPv6Protocol) {
++        addNewHost(NvAddress(address, DEFAULT_HTTP_PORT), false);
++        return;
++    }
+     QUrl url = QUrl::fromUserInput("moonlight://" + address);
+     if (url.isValid() && !url.host().isEmpty() && url.scheme() == "moonlight") {
+         // If there wasn't a port specified, use the default
+         addNewHost(NvAddress(url.host(), url.port(DEFAULT_HTTP_PORT)), false);
+     }
+-    else if (QHostAddress(address).protocol() == QAbstractSocket::IPv6Protocol) {
+-        // The user specified an IPv6 literal without URL escaping, so use the default port
+-        addNewHost(NvAddress(address, DEFAULT_HTTP_PORT), false);
+-    }
+     else {
+         emit computerAddCompleted(false, false);
+     }
+diff --git a/app/backend/computerseeker.cpp b/app/backend/computerseeker.cpp
+index 574098a6..d58ea945 100644
+--- a/app/backend/computerseeker.cpp
++++ b/app/backend/computerseeker.cpp
+@@ -1,7 +1,21 @@
+ #include "computerseeker.h"
+ #include "computermanager.h"
++#include <QAbstractSocket>
++#include <QHostAddress>
+ #include <QTimer>
+ 
++static bool isAddressLiteral(const QString& name)
++{
++    QHostAddress ip(name);
++    return ip.protocol() == QAbstractSocket::IPv4Protocol ||
++           ip.protocol() == QAbstractSocket::IPv6Protocol;
++}
++
++static bool activeAddressIs(NvComputer* computer, const QString& name)
++{
++    return QHostAddress(computer->activeAddress.address()) == QHostAddress(name);
++}
++
+ ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent)
+     : QObject(parent), m_ComputerManager(manager), m_ComputerName(computerName),
+       m_TimeoutTimer(new QTimer(this))
+@@ -23,12 +37,13 @@ void ComputerSeeker::start(int timeout)
+ {
+     m_TimeoutTimer->start(timeout);
+ 
+-    // If we don't know this computer by name, address, or UUID, try adding it
+-    // manually and see if we can find it by address, hostname, or mDNS.
+-    //
+-    // NB: We don't do this unconditionally because it will wipe out the user's
+-    // manual address if they pass another reachable hostname/address.
+-    if (!findMatchingComputer()) {
++    NvComputer* existing = findMatchingComputer();
++
++    // A cached PC can match this IP (or name) and still be OFFLINE on a dead
++    // LAN address, or have a stale Sunshine UUID. Eclipse always passes the
++    // Tailscale IPv4; skip addNewHostManually only when a non-IP lookup is
++    // already online so we do not clobber a working manual address.
++    if (!existing || !isOnline(existing) || isAddressLiteral(m_ComputerName)) {
+         m_ComputerManager->addNewHostManually(m_ComputerName);
+     }
+ 
+@@ -40,11 +55,18 @@ void ComputerSeeker::onComputerUpdated(NvComputer *computer)
+     if (!m_TimeoutTimer->isActive()) {
+         return;
+     }
+-    if (matchComputer(computer) && isOnline(computer)) {
+-        m_ComputerManager->stopPollingAsync();
+-        m_TimeoutTimer->stop();
+-        emit computerFound(computer);
++    if (!matchComputer(computer) || !isOnline(computer)) {
++        return;
+     }
++    // Cached PCs often store LAN + WAN next to the Tailscale IP Eclipse
++    // passed. Polling can mark them online on 192.168.x first; the stream
++    // then uses that address and video UDP never comes back over 100.x.
++    if (isAddressLiteral(m_ComputerName) && !activeAddressIs(computer, m_ComputerName)) {
++        return;
++    }
++    m_ComputerManager->stopPollingAsync();
++    m_TimeoutTimer->stop();
++    emit computerFound(computer);
+ }
+ 
+ bool ComputerSeeker::matchComputer(NvComputer *computer) const
+diff --git a/app/backend/nvhttp.cpp b/app/backend/nvhttp.cpp
+index f447b4ff..7e988875 100644
+--- a/app/backend/nvhttp.cpp
++++ b/app/backend/nvhttp.cpp
+@@ -205,7 +205,8 @@ NvHTTP::startApp(QString verb,
+                  bool localAudio,
+                  int gamepadMask,
+                  bool persistGameControllersOnDisconnect,
+-                 QString& rtspSessionUrl)
++                 QString& rtspSessionUrl,
++                 int hostDisplayIndex)
+ {
+     int riKeyId;
+ 
+@@ -234,6 +235,7 @@ NvHTTP::startApp(QString verb,
+                                    "&remoteControllersBitmap="+QString::number(gamepadMask)+
+                                    "&gcmap="+QString::number(gamepadMask)+
+                                    "&gcpersist="+QString::number(persistGameControllersOnDisconnect ? 1 : 0)+
++                                   (hostDisplayIndex >= 0 ? "&displayIndex="+QString::number(hostDisplayIndex) : "")+
+                                    LiGetLaunchUrlQueryParameters(),
+                                    LAUNCH_TIMEOUT_MS);
+ 
+diff --git a/app/backend/nvhttp.h b/app/backend/nvhttp.h
+index ea707801..626b9415 100644
+--- a/app/backend/nvhttp.h
++++ b/app/backend/nvhttp.h
+@@ -170,7 +170,8 @@ public:
+              bool localAudio,
+              int gamepadMask,
+              bool persistGameControllersOnDisconnect,
+-             QString& rtspSessionUrl);
++             QString& rtspSessionUrl,
++             int hostDisplayIndex = -1);
+ 
+     QVector<NvApp>
+     getAppList();
+diff --git a/app/cli/commandlineparser.cpp b/app/cli/commandlineparser.cpp
+index 2acac458..262c88ca 100644
+--- a/app/cli/commandlineparser.cpp
++++ b/app/cli/commandlineparser.cpp
+@@ -371,6 +371,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
+     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
+     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
+     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
++    parser.addValueOption("host-display", "host display index (0-based)");
+ 
+     if (!parser.parse(args)) {
+         parser.showError(parser.errorText());
+@@ -506,6 +507,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
+         preferences->videoDecoderSelection = mapValue(m_VideoDecoderMap, parser.getChoiceOptionValue("video-decoder"));
+     }
+ 
++    if (parser.isSet("host-display")) {
++        preferences->hostDisplayIndex = parser.getIntOption("host-display");
++    }
++
+     // This method will not return and terminates the process if --version or
+     // --help is specified
+     parser.handleHelpAndVersionOptions();
+diff --git a/app/cli/pair.cpp b/app/cli/pair.cpp
+index 20121662..ab3f8a42 100644
+--- a/app/cli/pair.cpp
++++ b/app/cli/pair.cpp
+@@ -4,8 +4,9 @@
+ #include "backend/computerseeker.h"
+ #include <QCoreApplication>
+ #include <QTimer>
++#include <cstdio>
+ 
+-#define COMPUTER_SEEK_TIMEOUT 10000
++#define COMPUTER_SEEK_TIMEOUT 30000
+ 
+ namespace CliPair
+ {
+@@ -76,9 +77,10 @@ public:
+         case Event::ComputerFound:
+             if (m_State == StateSeekComputer) {
+                 if (event.computer->pairState == NvComputer::PS_PAIRED) {
+-                    m_State = StateFailure;
+-                    QString msg = QObject::tr("%1 is already paired").arg(event.computer->name);
+-                    emit q->failed(msg);
++                    m_State = StateComplete;
++                    fprintf(stdout, "%s is already paired\n", qPrintable(event.computer->name));
++                    emit q->success();
++                    QCoreApplication::exit(0);
+                 }
+                 else {
+                     Q_ASSERT(!m_PredefinedPin.isEmpty());
+@@ -94,11 +96,15 @@ public:
+             if (m_State == StatePairing) {
+                 if (event.errorMessage.isEmpty()) {
+                     m_State = StateComplete;
++                    fprintf(stdout, "Pairing completed successfully\n");
+                     emit q->success();
++                    QCoreApplication::exit(0);
+                 }
+                 else {
+                     m_State = StateFailure;
++                    fprintf(stderr, "%s\n", qPrintable(event.errorMessage));
+                     emit q->failed(event.errorMessage);
++                    QCoreApplication::exit(1);
+                 }
+             }
+             break;
+@@ -106,7 +112,10 @@ public:
+         case Event::Timedout:
+             if (m_State == StateSeekComputer) {
+                 m_State = StateFailure;
+-                emit q->failed(QObject::tr("Failed to connect to %1").arg(m_ComputerName));
++                QString msg = QObject::tr("Failed to connect to %1").arg(m_ComputerName);
++                fprintf(stderr, "%s\n", qPrintable(msg));
++                emit q->failed(msg);
++                QCoreApplication::exit(1);
+             }
+             break;
+         }
+diff --git a/app/cli/startstream.cpp b/app/cli/startstream.cpp
+index 5f79b555..1eef7966 100644
+--- a/app/cli/startstream.cpp
++++ b/app/cli/startstream.cpp
+@@ -82,6 +82,10 @@ public:
+                 if (event.computer->pairState == NvComputer::PS_PAIRED) {
+                     m_State = StateSeekApp;
+                     m_Computer = event.computer;
++                    if (!event.computer->name.isEmpty()) {
++                        m_DisplayName = event.computer->name;
++                        emit q->computerNameChanged();
++                    }
+                     m_TimeoutTimer->start(APP_SEEK_TIMEOUT);
+                     emit q->searchingApp();
+                 } else {
+@@ -172,6 +176,7 @@ public:
+ 
+     Launcher *q_ptr;
+     QString m_ComputerName;
++    QString m_DisplayName;
+     QString m_AppName;
+     StreamingPreferences *m_Preferences;
+     ComputerManager *m_ComputerManager;
+@@ -222,6 +227,15 @@ bool Launcher::isExecuted() const
+     return d->m_State != StateInit;
+ }
+ 
++QString Launcher::computerName() const
++{
++    Q_D(const Launcher);
++    if (!d->m_DisplayName.isEmpty()) {
++        return d->m_DisplayName;
++    }
++    return d->m_ComputerName;
++}
++
+ void Launcher::onComputerFound(NvComputer *computer)
+ {
+     Q_D(Launcher);
+diff --git a/app/cli/startstream.h b/app/cli/startstream.h
+index 0927cda1..3fb10628 100644
+--- a/app/cli/startstream.h
++++ b/app/cli/startstream.h
+@@ -18,6 +18,7 @@ class Launcher : public QObject
+ {
+     Q_OBJECT
+     Q_DECLARE_PRIVATE_D(m_DPtr, Launcher)
++    Q_PROPERTY(QString computerName READ computerName NOTIFY computerNameChanged)
+ 
+ public:
+     explicit Launcher(QString computer, QString app,
+@@ -27,6 +28,7 @@ public:
+     Q_INVOKABLE void execute(ComputerManager *manager);
+     Q_INVOKABLE void quitRunningApp();
+     Q_INVOKABLE bool isExecuted() const;
++    QString computerName() const;
+ 
+ signals:
+     void searchingComputer();
+@@ -34,6 +36,7 @@ signals:
+     void sessionCreated(QString appName, Session *session);
+     void failed(QString text);
+     void appQuitRequired(QString appName);
++    void computerNameChanged();
+ 
+ private slots:
+     void onComputerFound(NvComputer *computer);
+diff --git a/app/main.cpp b/app/main.cpp
+index c0be000c..9ad13883 100644
+--- a/app/main.cpp
++++ b/app/main.cpp
+@@ -3,6 +3,7 @@
+ #include <QQmlApplicationEngine>
+ #include <QQmlContext>
+ #include <QIcon>
++#include <QFontDatabase>
+ #include <QQuickStyle>
+ #include <QMutex>
+ #include <QtDebug>
+@@ -754,6 +755,12 @@ int main(int argc, char *argv[])
+     }
+ 
+     QGuiApplication app(argc, argv);
++    app.setApplicationDisplayName("Eclipse");
++    if (QFontDatabase::addApplicationFont(":/res/eclipse/JetBrainsMono-Regular.ttf") != -1) {
++        QFont uiFont("JetBrains Mono");
++        uiFont.setPixelSize(14);
++        app.setFont(uiFont);
++    }
+ 
+ #ifdef Q_OS_DARWIN
+     // macOS defaults "Keyboard navigation" to text fields and lists only, which
+@@ -922,13 +929,13 @@ int main(int argc, char *argv[])
+ #ifndef Q_OS_DARWIN
+     // Set the window icon except on macOS where we want to keep the
+     // modified macOS 11 style rounded corner icon.
+-    app.setWindowIcon(QIcon(":/res/moonlight.svg"));
++    app.setWindowIcon(QIcon(":/res/eclipse/moon-solid.svg"));
+ #endif
+ 
+     // This is necessary to show our icon correctly on Wayland
+-    app.setDesktopFileName("com.moonlight_stream.Moonlight");
+-    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.Moonlight");
+-    qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.Moonlight");
++    app.setDesktopFileName("com.eclipse.moonlight");
++    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.eclipse.moonlight");
++    qputenv("SDL_VIDEO_X11_WMCLASS", "com.eclipse.moonlight");
+ 
+     // Register our C++ types for QML
+     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
+@@ -1014,11 +1021,11 @@ int main(int argc, char *argv[])
+         }
+     case GlobalCommandLineParser::PairRequested:
+         {
+-            initialView = "qrc:/gui/CliPair.qml";
+             PairCommandLineParser pairParser;
+             pairParser.parse(app.arguments());
+             auto launcher = new CliPair::Launcher(pairParser.getHost(), pairParser.getPredefinedPin(), &app);
+-            engine.rootContext()->setContextProperty("launcher", launcher);
++            launcher->execute(new ComputerManager(StreamingPreferences::get()));
++            hasGUI = false;
+             break;
+         }
+     case GlobalCommandLineParser::ListRequested:
+diff --git a/app/settings/streamingpreferences.h b/app/settings/streamingpreferences.h
+index ad611f6a..bce6412c 100644
+--- a/app/settings/streamingpreferences.h
++++ b/app/settings/streamingpreferences.h
+@@ -200,6 +200,7 @@ public:
+     Language language;
+     CaptureSysKeysMode captureSysKeysMode;
+     RendererSelection rendererSelection;
++    int hostDisplayIndex = -1;
+ 
+ signals:
+     void displayModeChanged();
+diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
+index b195f73b..ab6ceb6c 100644
+--- a/app/streaming/input/keyboard.cpp
++++ b/app/streaming/input/keyboard.cpp
+@@ -3,6 +3,15 @@
+ #include <Limelight.h>
+ #include "SDL_compat.h"
+ 
++#include <QTcpSocket>
++#include <cstdio>
++
++#ifdef Q_OS_WIN32
++#include <process.h>
++#else
++#include <unistd.h>
++#endif
++
+ #define VK_0 0x30
+ #define VK_A 0x41
+ 
+@@ -13,6 +22,33 @@
+ #define VK_NUMPAD0 0x60
+ #endif
+ 
++static void eclipseControl(const char *command)
++{
++    const QByteArray dest = qgetenv("ECLIPSE_CONTROL");
++    if (dest.isEmpty()) {
++        return;
++    }
++    const QList<QByteArray> parts = dest.split(':');
++    if (parts.size() != 2) {
++        return;
++    }
++    bool ok = false;
++    const quint16 port = parts.at(1).toUShort(&ok);
++    if (!ok || port == 0) {
++        return;
++    }
++    QTcpSocket sock;
++    sock.connectToHost(QString::fromUtf8(parts.at(0)), port);
++    if (!sock.waitForConnected(400)) {
++        return;
++    }
++    sock.write(QByteArray(command) + '\n');
++    sock.flush();
++    sock.waitForBytesWritten(400);
++    sock.waitForReadyRead(400);
++    sock.disconnectFromHost();
++}
++
+ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
+ {
+     switch (combo) {
+@@ -185,6 +221,46 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+         return;
+     }
+ 
++    // Eclipse: Ctrl+Alt shortcuts (no Shift — that is Sunshine's display switch).
++    // Consumed locally so they never reach the host.
++    if (event->state == SDL_PRESSED) {
++        const bool ctrlAlt =
++            (event->keysym.mod & KMOD_CTRL) &&
++            (event->keysym.mod & KMOD_ALT) &&
++            !(event->keysym.mod & (KMOD_SHIFT | KMOD_GUI));
++        if (ctrlAlt) {
++            if (event->keysym.sym == SDLK_ESCAPE) {
++                eclipseControl("disconnect-all");
++                performSpecialKeyCombo(KeyComboQuit);
++                return;
++            }
++            if (event->keysym.sym == SDLK_f) {
++                performSpecialKeyCombo(KeyComboToggleFullScreen);
++                return;
++            }
++            if (event->keysym.sym == SDLK_q) {
++                performSpecialKeyCombo(KeyComboQuit);
++                return;
++            }
++            if (event->keysym.sym == SDLK_0) {
++                eclipseControl("open-all");
++                return;
++            }
++            if (event->keysym.sym >= SDLK_1 && event->keysym.sym <= SDLK_9) {
++                char buf[48];
++#ifdef Q_OS_WIN32
++                const unsigned pid = static_cast<unsigned>(_getpid());
++#else
++                const unsigned pid = static_cast<unsigned>(getpid());
++#endif
++                snprintf(buf, sizeof(buf), "switch-display %d %u",
++                         static_cast<int>(event->keysym.sym - SDLK_0), pid);
++                eclipseControl(buf);
++                return;
++            }
++        }
++    }
++
+     // Check for our special key combos
+     if ((event->state == SDL_PRESSED) &&
+             (event->keysym.mod & KMOD_CTRL) &&
+diff --git a/app/streaming/session.cpp b/app/streaming/session.cpp
+index 40c1e59c..b979ff22 100644
+--- a/app/streaming/session.cpp
++++ b/app/streaming/session.cpp
+@@ -40,6 +40,8 @@
+ #include <QGuiApplication>
+ #include <QCursor>
+ #include <QScreen>
++#include <QTimer>
++#include <QEventLoop>
+ 
+ #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+ #include <QQuickOpenGLUtils>
+@@ -1504,37 +1506,24 @@ void Session::updateOptimalWindowDisplayMode()
+ 
+ void Session::toggleFullscreen()
+ {
+-    bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
++    m_FullScreenFlag = SDL_WINDOW_FULLSCREEN_DESKTOP;
++    bool fullScreen = !(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP);
+ 
+-#if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN)
+-    // Destroy the video decoder before toggling full-screen because D3D9 can try
+-    // to put the window back into full-screen before we've managed to destroy
+-    // the renderer. This leads to excessive flickering and can cause the window
+-    // decorations to get messed up as SDL and D3D9 fight over the window style.
+-    //
+-    // On Apple Silicon Macs, the AVSampleBufferDisplayLayer may cause WindowServer
+-    // to deadlock when transitioning out of fullscreen. Destroy the decoder before
+-    // exiting fullscreen as a workaround. See issue #973.
++    // Destroy the decoder so SIZE_CHANGED recreates it with a letterboxed viewport.
+     SDL_LockMutex(m_DecoderLock);
+     delete m_VideoDecoder;
+     m_VideoDecoder = nullptr;
+     SDL_UnlockMutex(m_DecoderLock);
+-#endif
+ 
+     // Actually enter/leave fullscreen
+-    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
++    SDL_SetWindowFullscreen(m_Window, fullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+ 
+-#ifdef Q_OS_DARWIN
+-    // SDL on macOS has a bug that causes the window size to be reset to crazy
+-    // large dimensions when exiting out of true fullscreen mode. We can work
+-    // around the issue by manually resetting the position and size here.
+-    if (!fullScreen && m_FullScreenFlag == SDL_WINDOW_FULLSCREEN) {
++    if (!fullScreen) {
+         int x, y, width, height;
+         getWindowDimensions(x, y, width, height);
+         SDL_SetWindowSize(m_Window, width, height);
+         SDL_SetWindowPosition(m_Window, x, y);
+     }
+-#endif
+ 
+     // Input handler might need to start/stop keyboard grab after changing modes
+     m_InputHandler->updateKeyboardGrabState();
+@@ -1618,7 +1607,8 @@ bool Session::startConnectionAsync()
+                       m_Preferences->playAudioOnHost,
+                       m_InputHandler->getAttachedGamepadMask(),
+                       !m_Preferences->multiController,
+-                      rtspSessionUrl);
++                      rtspSessionUrl,
++                      m_Preferences->hostDisplayIndex);
+     } catch (const GfeHttpResponseException& e) {
+         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
+         return false;
+@@ -1794,6 +1784,16 @@ void Session::exec()
+     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+     QCoreApplication::sendPostedEvents();
+ 
++    // Hold the Eclipse splash on "connected" (green) for 1s, then open the stream.
++    {
++        QEventLoop hold;
++        QTimer::singleShot(1000, &hold, &QEventLoop::quit);
++        hold.exec(QEventLoop::ExcludeUserInputEvents);
++    }
++    if (m_QtWindow != nullptr) {
++        m_QtWindow->setVisible(false);
++    }
++
+     int x, y, width, height;
+     getWindowDimensions(x, y, width, height);
+ 
+@@ -1840,10 +1840,17 @@ void Session::exec()
+ 
+     // We use only the computer name on macOS to match Apple conventions where the
+     // app name is featured in the menu bar and the document name is in the title bar.
++    QString title = m_Computer->name;
++    const QString eclipseDisplay = qEnvironmentVariable("ECLIPSE_DISPLAY_NAME");
++    if (!eclipseDisplay.isEmpty()) {
++        title = QString("%1 — %2").arg(title, eclipseDisplay);
++    }
+ #ifdef Q_OS_DARWIN
+-    std::string windowName = QString(m_Computer->name).toStdString();
++    std::string windowName = title.toStdString();
+ #else
+-    std::string windowName = QString(m_Computer->name + " - Moonlight").toStdString();
++    std::string windowName = eclipseDisplay.isEmpty()
++        ? QString(m_Computer->name + " - Eclipse").toStdString()
++        : title.toStdString();
+ #endif
+ 
+     m_Window = SDL_CreateWindow(windowName.c_str(),
+@@ -1878,7 +1885,7 @@ void Session::exec()
+ 
+     m_InputHandler->setWindow(m_Window);
+ 
+-    QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
++    QSvgRenderer svgIconRenderer(QString(":/res/eclipse/moon-solid.svg"));
+     QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
+     svgImage.fill(0);
+ 
+diff --git a/app/streaming/streamutils.cpp b/app/streaming/streamutils.cpp
+index 9bd32f50..e1506259 100644
+--- a/app/streaming/streamutils.cpp
++++ b/app/streaming/streamutils.cpp
+@@ -127,6 +127,25 @@ SDL_Window* StreamUtils::createTestWindow()
+ 
+ void StreamUtils::scaleSourceToDestinationSurface(SDL_Rect* src, SDL_Rect* dst)
+ {
++    if (src->w <= 0 || src->h <= 0 || dst->w <= 0 || dst->h <= 0) {
++        return;
++    }
++
++    // Prefer integer scale so host pixels stay unstretched (letterbox/pillarbox).
++    int integerScale = dst->w / src->w;
++    if (dst->h / src->h < integerScale) {
++        integerScale = dst->h / src->h;
++    }
++    if (integerScale >= 1) {
++        int scaledW = src->w * integerScale;
++        int scaledH = src->h * integerScale;
++        dst->x += (dst->w - scaledW) / 2;
++        dst->y += (dst->h - scaledH) / 2;
++        dst->w = scaledW;
++        dst->h = scaledH;
++        return;
++    }
++
+     int dstH = SDL_ceilf((float)dst->w * src->h / src->w);
+     int dstW = SDL_ceilf((float)dst->h * src->w / src->h);
+ 

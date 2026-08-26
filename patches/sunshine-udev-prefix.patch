@@ -1,7 +1,11 @@
-diff --git i/cmake/FindSystemd.cmake w/cmake/FindSystemd.cmake
+Subject: sunshine-udev-prefix
+Why: Honor CMake UDEV/systemd install dirs so sidecar prefix is not /usr.
+Depends-on: vendor/PINS sunshine
+
+diff --git a/cmake/FindSystemd.cmake b/cmake/FindSystemd.cmake
 index b8d9fb7e..9ea4226b 100644
---- i/cmake/FindSystemd.cmake
-+++ w/cmake/FindSystemd.cmake
+--- a/cmake/FindSystemd.cmake
++++ b/cmake/FindSystemd.cmake
 @@ -14,20 +14,26 @@ IF (NOT WIN32)
      endif()
  
@@ -41,10 +45,10 @@ index b8d9fb7e..9ea4226b 100644
  
          mark_as_advanced(
                  SYSTEMD_USER_UNIT_INSTALL_DIR
-diff --git i/cmake/FindUdev.cmake w/cmake/FindUdev.cmake
+diff --git a/cmake/FindUdev.cmake b/cmake/FindUdev.cmake
 index 35b03ce7..89c469e4 100644
---- i/cmake/FindUdev.cmake
-+++ w/cmake/FindUdev.cmake
+--- a/cmake/FindUdev.cmake
++++ b/cmake/FindUdev.cmake
 @@ -20,12 +20,14 @@ if(NOT WIN32)
              set(UDEV_VERSION "0")
          endif()

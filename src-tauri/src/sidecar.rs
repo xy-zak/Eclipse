@@ -3,6 +3,10 @@
 //! Packaged installs attach to a boot-time Sunshine service; `tauri dev` still
 //! spawns a child and kills only that child on exit.
 
+use crate::hostconf::{
+    ensure_sunshine_conf, random_ui_password, sunshine_creds_are_legacy_eclipse,
+    write_web_ui_password_file, SUNSHINE_UI_USER,
+};
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -102,11 +106,6 @@ pub const MOONLIGHT: Engine = Engine {
     health: None,
 };
 
-/// Seeded Sunshine Web UI credentials when the host has none yet.
-/// Tailscale is the security boundary; these are not a secret.
-pub const SUNSHINE_UI_USER: &str = "eclipse";
-pub const SUNSHINE_UI_PASS: &str = "eclipse";
-
 /// Packaged Linux host service config (`ConfigurationDirectory=eclipse`).
 const LINUX_SYSTEM_SUNSHINE_DIR: &str = "/etc/eclipse/sunshine";
 
@@ -173,18 +172,21 @@ pub fn sunshine_creds_present(path: &Path) -> bool {
 
 fn ensure_ui_credentials() {
     let path = sunshine_state_path();
-    if sunshine_creds_present(&path) {
+    if sunshine_creds_present(&path) && !sunshine_creds_are_legacy_eclipse(&path) {
         return;
     }
+    let password = random_ui_password();
     let args = [
         "--creds".to_string(),
         SUNSHINE_UI_USER.to_string(),
-        SUNSHINE_UI_PASS.to_string(),
+        password.clone(),
     ];
     match SUNSHINE.run_args(&args) {
         Ok(out) if out.status.success() => {
+            write_web_ui_password_file(&password);
             eprintln!(
-                "Eclipse: seeded Sunshine Web UI credentials ({SUNSHINE_UI_USER}/{SUNSHINE_UI_PASS})."
+                "Eclipse: seeded Sunshine Web UI credentials (user {SUNSHINE_UI_USER}; see {}).",
+                crate::hostconf::web_ui_password_path().display()
             );
         }
         Ok(out) => {
@@ -614,6 +616,7 @@ impl HostProcess {
             );
             return;
         }
+        ensure_sunshine_conf();
         ensure_ui_credentials();
         match SUNSHINE.spawn() {
             Ok(child) => {

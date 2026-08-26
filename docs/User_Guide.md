@@ -7,19 +7,20 @@ There are **no published GitHub Releases yet**. You can build a native package o
 ## What works today
 
 - A packaged install starts Sunshine at boot (`eclipse-host.service` on Linux, `SunshineService` on Windows). You do not need to open Eclipse for this PC to be a host.
-- After you log in, an **Eclipse tray icon** appears. **Host streaming** is on by default; uncheck it to pause the host without uninstalling. The icon stays so you can turn it back on. A reboot turns the host on again.
+- After you log in, an **Eclipse tray icon** appears. **Host streaming** is on by default; uncheck it to pause the host without uninstalling. While it is on, other machines on your Tailscale network can control this desktop. The icon stays so you can turn it back on. A reboot turns the host on again. Sunshine’s own tray is off; only this Eclipse tray is used.
+- While Host streaming is on, the PC will **not idle-sleep** (timeout). Closing the lid or pressing the power button still sleeps the machine; it is then unreachable until it wakes. After wake, the host service restarts so capture and the network recover.
+- Desktop idle daemons (Hyprland `hypridle`, GNOME auto-suspend) often call `systemctl suspend` on a timer. That is the same path as lid-close, so Eclipse cannot block it without also blocking the lid. Turn that timer off if you want timeout-proof hosting.
 - Closing the Eclipse window hides it to the tray. **Quit Eclipse** in the tray menu exits the app and leaves the packaged host service running (or stopped, if you toggled it off).
 - Opening Eclipse shows whether the Sunshine and Moonlight binaries are present and whether the host process answers on `:47990`.
 - If Tailscale is installed and logged in, **Peers** lists other machines on the tailnet and whether Sunshine answers on port `47990`.
 - **Connect** on a peer with Eclipse host online pairs (if needed) and opens a Moonlight window on Desktop.
-- Sunshine's own web UI is at [https://localhost:47990](https://localhost:47990) (self-signed certificate; the browser warning is expected). If Sunshine has no username yet, packages seed `eclipse` / `eclipse`.
+- Sunshine's own web UI is at [https://localhost:47990](https://localhost:47990) (self-signed certificate; the browser warning is expected). Username is `eclipse`. From the CLIENT panel use **Open host admin** and **Copy Web UI password**. Connect does not use this password.
 
 ## What is not built yet
 
 - GitHub Actions published installers (local `package.sh` / `package.ps1` exist)
-- Prompting for a custom Sunshine Web UI password (Connect expects the seeded `eclipse` / `eclipse` credentials)
 
-Two Eclipse machines on the same tailnet can Connect. A packaged host stays online after reboot without anyone logging in. The tray is only present after a desktop login. Source builds use the tray to start/stop a Sunshine child (no system service). Linux input injection still needs the `input` group (packages add it; log out once).
+Two Eclipse machines on the same tailnet can Connect. A packaged host stays online after reboot without anyone logging in, and does not idle-sleep while Host streaming is on. The tray is only present after a desktop login. Source builds use the tray to start/stop a Sunshine child (no system service). Linux input injection still needs the `input` group (packages add it; log out once).
 
 ---
 
@@ -93,6 +94,12 @@ For a machine that just powered on to be reachable **before anyone logs in**, Ta
 You do not need Tailscale to verify that Sunshine starts locally. Without it, Peers shows an error instead of a list.
 
 Host-online on a peer means TCP to `:47990` succeeded. If the peer’s Sunshine is bound only to localhost, it will show as on the tailnet but “No Sunshine.”
+
+Packaged installs restrict inbound GameStream (TCP 47984–47990, 48010 and UDP 47998–48010) to Tailscale CGNAT `100.64.0.0/10`. Loopback still works for the local Web UI and smoke tests. Source trees apply the same firewall rules when you run `./scripts/linux-host-perms.sh` or `.\scripts\windows-firewall.ps1`.
+
+Video and audio encryption is mandatory (`lan_encryption_mode = 2`). Pairing and display APIs on `:47990` do not use the Web UI password when the caller is loopback or CGNAT. Any device on your tailnet can pair; tighten that with [Tailscale ACLs](https://tailscale.com/kb/1018/acls) on those ports if the tailnet has phones or untrusted nodes.
+
+If Connect warns that a host’s certificate changed, confirm **Trust this Host** only if you just reinstalled Eclipse on that PC. App updates do not rotate the certificate.
 
 ### Runtime libraries
 
@@ -190,12 +197,12 @@ On Hyprland / Omarchy, the tray appears only if the bar has a tray module (for e
 | Port 47990 already in use | Another Sunshine is running, or Host streaming is still on. Toggle it off in the tray, or stop `eclipse-host.service` / `SunshineService`. |
 | Peers says Tailscale is not installed / not running | Install Tailscale and run `tailscale up`. Eclipse does not log you in. |
 | Peer is on the tailnet but “No Sunshine” | The other PC’s host service is not running, or Sunshine is not listening on `:47990`. On a packaged host you do not need Eclipse open. On Windows, confirm `https://localhost:47990` loads on the host. Windows Firewall may still block inbound GameStream ports on the Tailscale adapter. |
-| Connect says PIN was not accepted before timeout | On Windows, Moonlight needs Qt/SDL/FFmpeg DLLs next to it — rebuild sidecars and restart Eclipse. On either OS, the host PC must have Sunshine up and GameStream ports reachable over Tailscale. |
+| Connect says PIN was not accepted before timeout | On Windows, Moonlight needs Qt/SDL/FFmpeg DLLs next to it — rebuild sidecars and restart Eclipse. On either OS, the host PC must have Sunshine up and GameStream ports reachable over Tailscale (`100.64.0.0/10`). |
 | Moonlight: “No video received from host” / UDP 47998, 48000 | See [Video.md](Video.md). If audio arrived, UDP is open. Check the host Sunshine log for extra Sunshine on RTSP `48010`, `Couldn't import RGB Image: 00003009` (rebuild sidecars), or capture init failure. |
 | Moonlight error 503 / “Failed to initialise video capture/encoding” | Host capture never started. If `capture = kms`, run `./scripts/linux-host-perms.sh` or `--reset-capture`. See [Video.md](Video.md). |
 | Linux: `Couldn't import RGB Image: 00003009` | EGL DMA-BUF import failed on `wlr`. Rebuild sidecars so `patches/sunshine-egl-bad-match.patch` is applied. Do not force KMS unless `wlr` still fails. |
 | Two copies of Sunshine | Uninstall distro Sunshine / close the other Eclipse window. GameStream RTSP is port `48010`; the Web UI is `47990`. Both must be the same process. |
-| Connect says the host uses a custom Web UI password | That PC set a Sunshine password other than `eclipse` / `eclipse`. Eclipse does not prompt for it this version. |
-| Connect opens Moonlight but input does not work (Linux) | Run `./scripts/linux-host-perms.sh`, then log out so the `input` group applies. Confirm `/dev/uinput` is writable. |
-| Video works, input does not (Linux) | Same as above: `input` group and `/dev/uinput`. |
+| Connect asks to trust a changed host certificate | Expected after a full reinstall of Eclipse on that host PC. Choose **Trust this Host**. App updates do not change the cert. |
+| Cannot log into https://localhost:47990 | Username is `eclipse`. Use **Copy Web UI password** on the CLIENT panel. The same secret is in `/etc/eclipse/sunshine/web-ui-password` or the install `config\web-ui-password` file (source: next to `sunshine_state.json`). |
+| Video works, input does not (Linux) | Run `./scripts/linux-host-perms.sh`, then log out so the `input` group applies. Confirm `/dev/uinput` is writable. |
 

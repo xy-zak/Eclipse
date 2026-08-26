@@ -1,0 +1,119 @@
+Subject: sunshine-idle-awake
+Why: Windows sunshinesvc: PowerRequestSystemRequired while Sunshine.exe runs; restart on resume. Lid-close still sleeps.
+Depends-on: vendor/PINS sunshine
+
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index 5a2c9e17..869c83c0 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -45,5 +45,6 @@ add_executable(sunshinesvc sunshinesvc.cpp)
+ target_link_libraries(sunshinesvc
+         ${CMAKE_THREAD_LIBS_INIT}
+         wtsapi32
++        powrprof
+         ${PLATFORM_LIBRARIES})
+ target_compile_options(sunshinesvc PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+diff --git a/tools/sunshinesvc.cpp b/tools/sunshinesvc.cpp
+index e23ecf9a..ea136f08 100644
+--- a/tools/sunshinesvc.cpp
++++ b/tools/sunshinesvc.cpp
+@@ -6,6 +6,7 @@
+ #include <format>
+ #include <string>
+ #include <Windows.h>
++#include <pbt.h>
+ #include <WtsApi32.h>
+ 
+ // local includes
+@@ -18,16 +19,63 @@
+ 
+ SERVICE_STATUS_HANDLE service_status_handle;
+ SERVICE_STATUS service_status;
+-HANDLE stop_event;
+-HANDLE session_change_event;
++HANDLE stop_event = nullptr;  ///< SCM stop / preshutdown event.
++HANDLE session_change_event = nullptr;  ///< Console-session change or resume from sleep.
++HANDLE idle_awake_request = nullptr;  ///< PowerRequestSystemRequired while Sunshine.exe runs.
+ 
+ constexpr auto SERVICE_NAME = "SunshineService";
+ 
++/**
++ * @brief Block OS idle sleep while Sunshine.exe is running.
++ *
++ * Lid-close and the power button still sleep the machine. Display sleep is
++ * left to Sunshine's capture path.
++ */
++void AcquireIdleAwake() {
++  if (idle_awake_request) {
++    return;
++  }
++
++  REASON_CONTEXT ctx {};
++  ctx.Version = POWER_REQUEST_CONTEXT_VERSION;
++  ctx.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
++  ctx.Reason.SimpleReasonString = const_cast<wchar_t *>(L"Eclipse host streaming");
++
++  idle_awake_request = PowerCreateRequest(&ctx);
++  if (!idle_awake_request) {
++    return;
++  }
++  if (!PowerSetRequest(idle_awake_request, PowerRequestSystemRequired)) {
++    CloseHandle(idle_awake_request);
++    idle_awake_request = nullptr;
++  }
++}
++
++/**
++ * @brief Drop the idle-sleep power request when Sunshine.exe is not running.
++ */
++void ReleaseIdleAwake() {
++  if (!idle_awake_request) {
++    return;
++  }
++  PowerClearRequest(idle_awake_request, PowerRequestSystemRequired);
++  CloseHandle(idle_awake_request);
++  idle_awake_request = nullptr;
++}
++
+ DWORD WINAPI HandlerEx(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
+   switch (dwControl) {
+     case SERVICE_CONTROL_INTERROGATE:
+       return NO_ERROR;
+ 
++    case SERVICE_CONTROL_POWEREVENT:
++      // Restart Sunshine after resume so capture and the NIC recover.
++      if ((dwEventType == PBT_APMRESUMEAUTOMATIC || dwEventType == PBT_APMRESUMESUSPEND) &&
++          session_change_event != nullptr) {
++        SetEvent(session_change_event);
++      }
++      return NO_ERROR;
++
+     case SERVICE_CONTROL_SESSIONCHANGE:
+       // If a new session connects to the console, restart Sunshine
+       // to allow it to spawn inside the new console session.
+@@ -242,7 +290,7 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
+   UpdateProcThreadAttribute(startup_info.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &log_file_handle, sizeof(log_file_handle), nullptr, nullptr);
+ 
+   // Tell SCM we're running (and stoppable now)
+-  service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE;
++  service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE | SERVICE_ACCEPT_POWEREVENT;
+   service_status.dwCurrentState = SERVICE_RUNNING;
+   SetServiceStatus(service_status_handle, &service_status);
+ 
+@@ -276,6 +324,8 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
+       continue;
+     }
+ 
++    AcquireIdleAwake();
++
+     bool still_running;
+     do {
+       // Wait for the stop event to be set, Sunshine.exe to terminate, or the console session to change
+@@ -313,6 +363,7 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
+       }
+     } while (still_running);
+ 
++    ReleaseIdleAwake();
+     CloseHandle(process_info.hThread);
+     CloseHandle(process_info.hProcess);
+     CloseHandle(console_token);

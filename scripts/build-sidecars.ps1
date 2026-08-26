@@ -155,7 +155,9 @@ function Apply-MoonlightPatches {
 }
 
 # Sunshine is a CUI binary. A GUI Eclipse host must not flash a console when
-# the service or sidecar launches it. Mark the PE subsystem as WINDOWS.
+# the service or sidecar launches it. Mark the PE subsystem as WINDOWS
+# (IMAGE_SUBSYSTEM_WINDOWS_GUI). Official Sunshine's own installer does this
+# too; we are not changing the SCM service name (must stay SunshineService).
 function Set-SunshineWindowsGui {
     param([Parameter(Mandatory = $true)][string]$Exe)
     $bytes = [System.IO.File]::ReadAllBytes($Exe)
@@ -211,11 +213,19 @@ $srcUnix = ConvertTo-EclipseMsysPath $SunshineSrc
 $buildUnix = ConvertTo-EclipseMsysPath $BuildSun
 $prefixUnix = ConvertTo-EclipseMsysPath $Prefix
 
+$sunIcoUnix = ""
+$sunIco = Join-Path $Root "src-tauri\icons\sunshine.ico"
+if (Test-Path $sunIco) {
+    $sunIcoUnix = ConvertTo-EclipseMsysPath $sunIco
+}
+
 Write-Host "==> Configuring Sunshine (MSYS2 UCRT64)"
 Write-Host "Sunshine version: $sunTag"
 # Single-line cmake: bash -c only reliably sees one -c argument, and CRLF
 # backslash continuations are not line joins.
-Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF -DSUNSHINE_ENABLE_CUDA=$useCuda -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
+$icoFlag = ""
+if ($sunIcoUnix) { $icoFlag = "-DSUNSHINE_ICON_PATH='$sunIcoUnix'" }
+Invoke-EclipseMsys2 -Command "unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX CMAKE_GENERATOR; cmake -S '$srcUnix' -B '$buildUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX='$prefixUnix' -DSUNSHINE_ASSETS_DIR=share/sunshine -DSUNSHINE_ASSETS_DIR_DEF=share/sunshine -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WERROR=OFF -DSUNSHINE_ENABLE_TRAY=OFF $icoFlag -DSUNSHINE_ENABLE_CUDA=$useCuda -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_PUBLISHER_NAME=Eclipse -DSUNSHINE_PUBLISHER_ISSUE_URL=https://github.com"
 
 Write-Host "==> Building Sunshine"
 Invoke-EclipseMsys2 -Command "cmake --build '$buildUnix' && cmake --install '$buildUnix'"
@@ -237,6 +247,14 @@ $share = Join-Path $Prefix "share\sunshine"
 if (Test-Path $share) {
     Copy-Item "$share\*" $AssetDir -Recurse -Force
 }
+$sunSvg = Join-Path $Root "src-tauri\icons\sunshine.svg"
+$webImages = Join-Path $AssetDir "web\images"
+if ((Test-Path $sunSvg) -and (Test-Path $webImages)) {
+    Copy-Item $sunSvg (Join-Path $webImages "logo-sunshine.svg") -Force
+    if (Test-Path $sunIco) {
+        Copy-Item $sunIco (Join-Path $webImages "sunshine.ico") -Force
+    }
+}
 
 $moonLibs = Join-Path $MoonlightSrc "libs\windows"
 if (-not (Test-Path $moonLibs)) {
@@ -256,6 +274,10 @@ foreach ($font in @("Remboy-Regular.ttf", "JetBrainsMono-Regular.ttf")) {
     $src = Join-Path $fontDir $font
     if (-not (Test-Path $src)) { throw "Missing Eclipse font $src" }
     Copy-Item $src $moonFontDir -Force
+}
+$moonIco = Join-Path $Root "src-tauri\icons\moonlight.ico"
+if (Test-Path $moonIco) {
+    Copy-Item $moonIco (Join-Path $MoonlightSrc "app\moonlight.ico") -Force
 }
 Push-Location $BuildMoon
 & $qmake.Source (Join-Path $MoonlightSrc "moonlight-qt.pro") "CONFIG+=release"
