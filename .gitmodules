@@ -1,7 +1,11 @@
 # Required commits: vendor/PINS (scripts/check-pins.sh).
+# ignore=dirty: patched working trees after sidecar builds are expected;
+# a moved pin SHA still shows as a real change.
 [submodule "vendor/sunshine"]
 	path = vendor/sunshine
 	url = https://github.com/LizardByte/Sunshine.git
+	ignore = dirty
 [submodule "vendor/moonlight-qt"]
 	path = vendor/moonlight-qt
 	url = https://github.com/moonlight-stream/moonlight-qt.git
+	ignore = dirty
