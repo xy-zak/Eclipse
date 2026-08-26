@@ -10,6 +10,7 @@ import { PixelIcon } from "./PixelIcon";
 const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Ctrl+Alt+Esc", action: "Disconnect all windows" },
   { keys: "Ctrl+Alt+F", action: "Fullscreen this window" },
+  { keys: "Ctrl+Alt+-", action: "List host displays" },
   { keys: "Ctrl+Alt+1–9", action: "This window → host display N" },
   { keys: "Ctrl+Alt+0", action: "One window per host display" },
   { keys: "Ctrl+Alt+Q", action: "Close this window" },

@@ -4,7 +4,7 @@
 //! window; the last window (or Ctrl+Alt+Esc) disconnects.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -166,6 +166,8 @@ fn pair_timeout_message(output: &str) -> String {
 enum ControlCmd {
     DisconnectAll,
     OpenAll,
+    ShowDisplays,
+    RegisterUi { port: u16, pid: u32 },
     SwitchDisplay { index: usize, pid: Option<u32> },
     Ignore,
 }
@@ -177,6 +179,19 @@ fn parse_control_line(cmd: &str) -> ControlCmd {
     }
     if cmd == "open-all" || cmd == "0" {
         return ControlCmd::OpenAll;
+    }
+    if cmd == "show-displays" {
+        return ControlCmd::ShowDisplays;
+    }
+    if let Some(rest) = cmd.strip_prefix("register-ui ") {
+        let mut parts = rest.split_whitespace();
+        let Some(port) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
+            return ControlCmd::Ignore;
+        };
+        let Some(pid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            return ControlCmd::Ignore;
+        };
+        return ControlCmd::RegisterUi { port, pid };
     }
     if let Some(rest) = cmd.strip_prefix("switch-display ") {
         let mut parts = rest.split_whitespace();
@@ -190,6 +205,34 @@ fn parse_control_line(cmd: &str) -> ControlCmd {
         };
     }
     ControlCmd::Ignore
+}
+
+fn display_shortcut(index: usize) -> String {
+    let key = index + 1;
+    if key <= 9 {
+        format!("Ctrl+Alt+{key}")
+    } else {
+        String::new()
+    }
+}
+
+fn format_display_map(displays: &[DisplayInfo]) -> String {
+    let mut out = String::new();
+    for (i, d) in displays.iter().enumerate() {
+        let name = d.name.replace(['\t', '\n', '\r'], " ");
+        out.push_str(&format!("{i}\t{}\t{name}\n", display_shortcut(i)));
+    }
+    out
+}
+
+fn push_display_map(port: u16, body: &str) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(150)) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let _ = write!(stream, "{body}");
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -259,6 +302,7 @@ struct StreamChild {
     child: Child,
     display_index: usize,
     audio: bool,
+    ui_port: Option<u16>,
 }
 
 struct SessionInner {
@@ -607,6 +651,7 @@ impl SessionInner {
                 child,
                 display_index,
                 audio,
+                ui_port: None,
             });
         Ok(())
     }
@@ -621,6 +666,41 @@ impl SessionInner {
             }
         }
         self.spawn_window(ip, display_index, audio)
+    }
+
+    fn register_ui_port(&self, pid: u32, port: u16) {
+        if port == 0 {
+            return;
+        }
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = windows.iter_mut().find(|w| w.child.id() == pid) {
+            slot.ui_port = Some(port);
+        }
+    }
+
+    fn broadcast_display_map(&self) -> String {
+        if let Some(ip) = self
+            .connected_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            self.refresh_host_displays(&ip);
+        }
+        let host = self.host_displays.lock().unwrap_or_else(|e| e.into_inner());
+        let body = format_display_map(&host);
+        drop(host);
+        let ports: Vec<u16> = self
+            .windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|w| w.ui_port)
+            .collect();
+        for port in ports {
+            push_display_map(port, &body);
+        }
+        body
     }
 
     fn pair_host(&self, ip: &str) -> Result<(), String> {
@@ -736,16 +816,39 @@ fn start_control_listener(inner: Arc<SessionInner>) {
                 continue;
             }
             let cmd = parse_control_line(line.trim());
-            let result = match cmd {
+            let reply = match cmd {
                 ControlCmd::DisconnectAll => {
                     inner.stop();
-                    Ok(())
+                    "ok".to_string()
                 }
-                ControlCmd::OpenAll => inner.open_all_displays(),
-                ControlCmd::SwitchDisplay { index, pid } => inner.switch_display(index, pid),
-                ControlCmd::Ignore => Ok(()),
+                ControlCmd::OpenAll => {
+                    if inner.open_all_displays().is_ok() {
+                        "ok".into()
+                    } else {
+                        "err".into()
+                    }
+                }
+                ControlCmd::ShowDisplays => {
+                    let body = inner.broadcast_display_map();
+                    format!("ok\n{body}")
+                }
+                ControlCmd::RegisterUi { port, pid } => {
+                    inner.register_ui_port(pid, port);
+                    "ok".into()
+                }
+                ControlCmd::SwitchDisplay { index, pid } => {
+                    if inner.switch_display(index, pid).is_ok() {
+                        "ok".into()
+                    } else {
+                        "err".into()
+                    }
+                }
+                ControlCmd::Ignore => "ok".into(),
             };
-            let _ = writeln!(stream, "{}", if result.is_ok() { "ok" } else { "err" });
+            let _ = write!(stream, "{reply}");
+            if !reply.ends_with('\n') {
+                let _ = writeln!(stream);
+            }
         }
     });
 }
@@ -960,6 +1063,14 @@ no Qt platform plugin
         assert_eq!(parse_control_line("disconnect-all"), ControlCmd::DisconnectAll);
         assert_eq!(parse_control_line("esc"), ControlCmd::DisconnectAll);
         assert_eq!(parse_control_line("open-all"), ControlCmd::OpenAll);
+        assert_eq!(parse_control_line("show-displays"), ControlCmd::ShowDisplays);
+        assert_eq!(
+            parse_control_line("register-ui 51234 4242"),
+            ControlCmd::RegisterUi {
+                port: 51234,
+                pid: 4242,
+            }
+        );
         assert_eq!(
             parse_control_line("switch-display 2 4242"),
             ControlCmd::SwitchDisplay {
@@ -975,6 +1086,31 @@ no Qt platform plugin
             }
         );
         assert_eq!(parse_control_line("nope"), ControlCmd::Ignore);
+    }
+
+    #[test]
+    fn display_map_lists_shortcuts() {
+        let displays = [
+            DisplayInfo {
+                name: "eDP-1".into(),
+                width: 1920,
+                height: 1080,
+                focused: true,
+            },
+            DisplayInfo {
+                name: "HDMI-A-1".into(),
+                width: 2560,
+                height: 1440,
+                focused: false,
+            },
+        ];
+        assert_eq!(
+            format_display_map(&displays),
+            "0\tCtrl+Alt+1\teDP-1\n1\tCtrl+Alt+2\tHDMI-A-1\n"
+        );
+        assert_eq!(display_shortcut(0), "Ctrl+Alt+1");
+        assert_eq!(display_shortcut(8), "Ctrl+Alt+9");
+        assert_eq!(display_shortcut(9), "");
     }
 
     #[cfg(unix)]
@@ -994,11 +1130,13 @@ no Qt platform plugin
             child: finished,
             display_index: 0,
             audio: true,
+            ui_port: None,
         });
         session.inner.windows.lock().unwrap().push(StreamChild {
             child: live,
             display_index: 1,
             audio: false,
+            ui_port: None,
         });
         session.inner.reap_windows();
         assert!(session.inner.connected_ip.lock().unwrap().is_some());

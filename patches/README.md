@@ -2,7 +2,9 @@
 
 Eclipse does not fork Sunshine or Moonlight. Patches live here and are applied
 by `scripts/build-sidecars.sh` / `build-sidecars.ps1` against the SHAs in
-[`vendor/PINS`](../vendor/PINS).
+[`vendor/PINS`](../vendor/PINS). Each sidecar build **resets** the vendor tree
+to the pin then applies the series, so a partially patched Windows/Linux tree
+cannot ship Material colours without the Eclipse dialog chrome/fonts.
 
 ## Apply order
 

@@ -5,8 +5,11 @@
 //! status is `GET /api/sessions` on localhost. HTTP details stay here so an
 //! API change does not leak into React.
 
+#[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use crate::hostconf::{self, is_allowed_peer_ip};
 use crate::sidecar::{probe_tcp, SUNSHINE};
@@ -58,6 +61,7 @@ pub fn pin_url(host: &str) -> String {
     format!("https://{host}:{}/api/pin", sunshine_ui_port())
 }
 
+#[cfg(test)]
 pub fn logs_url(host: &str) -> String {
     format!("https://{host}:{}/api/logs", sunshine_ui_port())
 }
@@ -82,6 +86,7 @@ fn sunshine_ui_port() -> u16 {
     SUNSHINE.health().map(|h| h.port).unwrap_or(47990)
 }
 
+#[cfg(test)]
 fn latest_sunshine_log(log: &str) -> &str {
     log.rfind("Sunshine version:")
         .map(|i| &log[i..])
@@ -93,6 +98,7 @@ fn host_rtsp_bind_failed(log: &str) -> bool {
     latest_sunshine_log(log).contains("Couldn't bind RTSP server to port")
 }
 
+#[cfg(test)]
 fn host_capture_failed(log: &str) -> bool {
     let slice = latest_sunshine_log(log);
     slice.contains("Unable to initialize capture method")
@@ -101,6 +107,7 @@ fn host_capture_failed(log: &str) -> bool {
         || slice.contains("Video failed to find working encoder")
 }
 
+#[cfg(test)]
 fn host_kms_missing_caps(log: &str) -> bool {
     let slice = latest_sunshine_log(log);
     slice.contains("config: 'capture' = kms") && slice.contains("Failed to gain CAP_SYS_ADMIN")
@@ -108,6 +115,7 @@ fn host_kms_missing_caps(log: &str) -> bool {
 
 /// Fail Connect on capture/encoder problems. An RTSP bind log line alone is
 /// not enough: Sunshine often logs that after it already owns :48010.
+#[cfg(test)]
 pub fn host_video_issue(log: &str) -> Option<&'static str> {
     if host_kms_missing_caps(log) {
         Some(
@@ -161,6 +169,7 @@ pub fn ensure_gamestream_http(host: &str) -> Result<(), PinError> {
 }
 
 /// Retry `op` until it returns `Ok(true)` or the budget is exhausted.
+#[cfg(test)]
 pub fn retry_until_ok<F>(mut op: F, budget: Duration, interval: Duration) -> Result<(), PinError>
 where
     F: FnMut() -> Result<bool, PinError>,

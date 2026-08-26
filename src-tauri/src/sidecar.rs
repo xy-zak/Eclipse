@@ -107,6 +107,7 @@ pub const MOONLIGHT: Engine = Engine {
 };
 
 /// Packaged Linux host service config (`ConfigurationDirectory=eclipse`).
+#[cfg(any(not(windows), test))]
 const LINUX_SYSTEM_SUNSHINE_DIR: &str = "/etc/eclipse/sunshine";
 
 /// Windows SCM name hardcoded in `vendor/sunshine/tools/sunshinesvc.cpp`.
@@ -140,6 +141,7 @@ pub fn sunshine_state_path() -> PathBuf {
     }
 }
 
+#[cfg(any(not(windows), test))]
 fn linux_sunshine_state_path(
     system_dir: &Path,
     xdg_config: Option<PathBuf>,
@@ -222,13 +224,6 @@ impl Engine {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
             .join(self.triple_filename())
-    }
-
-    pub fn assets_dir(self) -> Option<PathBuf> {
-        self.assets_rel?;
-        sunshine_asset_candidates(current_exe_dir().as_deref())
-            .into_iter()
-            .find(|p| p.join("apps.json").is_file())
     }
 
     /// Dev builds copy `externalBin` next to the exe without a triple suffix.

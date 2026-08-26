@@ -71,33 +71,43 @@ if [[ ! -f "${SUNSHINE_SRC}/.git" && ! -d "${SUNSHINE_SRC}/.git" ]]; then
   git -C "${ROOT}" submodule update --init --recursive
 fi
 
+pin_sha() {
+  local vendor_rel="$1"
+  awk -v p="${vendor_rel}" 'NF && $1 !~ /^#/ && $1 == p { print $2; exit }' "${ROOT}/vendor/PINS"
+}
+
+reset_vendor_to_pin() {
+  local repo="$1"
+  local vendor_rel="$2"
+  local sha
+  sha="$(pin_sha "${vendor_rel}")"
+  if [[ -z "${sha}" ]]; then
+    echo "No pin for ${vendor_rel} in vendor/PINS" >&2
+    exit 1
+  fi
+  echo "==> Resetting ${vendor_rel} to pin ${sha}"
+  git -C "${repo}" reset --hard "${sha}"
+  # Keep gitignored prebuilts (moonlight libs/).
+  git -C "${repo}" clean -fd
+}
+
 apply_one_patch() {
   local repo="$1"
   local patch="$2"
   local name
   name="$(basename "${patch}")"
-  if git -C "${repo}" apply --reverse --check "${patch}" >/dev/null 2>&1; then
-    echo "Already applied ${name}"
-    return 0
-  fi
   echo "==> Applying ${name}"
-  if git -C "${repo}" apply --whitespace=nowarn "${patch}"; then
-    return 0
+  if ! git -C "${repo}" apply --whitespace=nowarn "${patch}"; then
+    echo "git apply failed for ${name}. Vendor tree must be the clean pin." >&2
+    return 1
   fi
-  # Later patches can overlap earlier ones, so reverse --check of the
-  # earlier patch fails even though the tree already contains it.
-  if ! git -C "${repo}" apply --check --whitespace=nowarn "${patch}" >/dev/null 2>&1; then
-    echo "Already applied ${name} (later patches overlap)"
-    return 0
-  fi
-  echo "git apply failed for ${name}" >&2
-  return 1
 }
 
 apply_sunshine_patches() {
   local patch
   shopt -s nullglob
   local found=0
+  reset_vendor_to_pin "${SUNSHINE_SRC}" "vendor/sunshine"
   for patch in "${ROOT}/patches/sunshine-"*.patch; do
     found=1
     apply_one_patch "${SUNSHINE_SRC}" "${patch}"
@@ -112,12 +122,23 @@ apply_moonlight_patches() {
   local patch
   shopt -s nullglob
   local found=0
+  reset_vendor_to_pin "${MOONLIGHT_SRC}" "vendor/moonlight-qt"
   for patch in "${ROOT}/patches/moonlight-"*.patch; do
     found=1
     apply_one_patch "${MOONLIGHT_SRC}" "${patch}"
   done
   if [[ "${found}" -eq 0 ]]; then
     echo "No patches/moonlight-*.patch files found" >&2
+    exit 1
+  fi
+  # Guard against a silent partial UI apply (Material colors without dialog chrome).
+  if ! grep -q 'exclamation\.svg' "${MOONLIGHT_SRC}/app/gui/NavigableMessageDialog.qml" \
+    || ! grep -q 'frameColor' "${MOONLIGHT_SRC}/app/gui/NavigableMessageDialog.qml"; then
+    echo "moonlight-02-ui.patch incomplete: NavigableMessageDialog.qml missing Eclipse dialog chrome" >&2
+    exit 1
+  fi
+  if ! grep -q 'JetBrains Mono' "${MOONLIGHT_SRC}/app/main.cpp"; then
+    echo "moonlight-01-behavior.patch incomplete: main.cpp missing JetBrains Mono app font" >&2
     exit 1
   fi
 }

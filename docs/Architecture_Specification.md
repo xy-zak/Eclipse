@@ -141,6 +141,7 @@ In-stream shortcuts are **Ctrl+Alt** (consumed in Moonlight, not sent to the hos
 | --- | --- |
 | Ctrl+Alt+Esc | Close every client window and disconnect (quit the host Desktop app) |
 | Ctrl+Alt+F | Toggle letterboxed fullscreen on this window |
+| Ctrl+Alt+- | List host displays and this window’s active display |
 | Ctrl+Alt+1–9 | Retarget this window to host display N |
 | Ctrl+Alt+0 | Open one client window per host display |
 | Ctrl+Alt+Q | Close this window; last window disconnects |

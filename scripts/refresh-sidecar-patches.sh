@@ -19,8 +19,11 @@ MOONLIGHT_BEHAVIOR=(
   app/cli/startstream.h
   app/main.cpp
   app/settings/streamingpreferences.h
+  app/streaming/eclipsepopup.cpp
+  app/streaming/eclipsepopup.h
   app/streaming/input/keyboard.cpp
   app/streaming/session.cpp
+  app/streaming/session.h
   app/streaming/streamutils.cpp
 )
 
@@ -105,7 +108,7 @@ echo "==> Moonlight"
 intent_add "${MOONLIGHT_SRC}" "${MOONLIGHT_BEHAVIOR[@]}" "${MOONLIGHT_UI[@]}"
 write_patch "${MOONLIGHT_SRC}" "${PATCH_DIR}/moonlight-01-behavior.patch" \
   "moonlight-01-behavior" \
-  "Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, integer-scale fullscreen, splash hold." \
+  "Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, fill-client window, display-map popup, splash hold." \
   "vendor/PINS moonlight-qt; apply before moonlight-02-ui.patch" \
   "${MOONLIGHT_BEHAVIOR[@]}"
 write_patch "${MOONLIGHT_SRC}" "${PATCH_DIR}/moonlight-02-ui.patch" \

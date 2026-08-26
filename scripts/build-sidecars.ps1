@@ -100,17 +100,52 @@ function Invoke-Git {
     )
     # git writes "error:" / "warning:" to stderr even for expected --check misses.
     # With $ErrorActionPreference Stop that becomes a terminating NativeCommandError.
+    # Capture streams so stdout does not become this function's return value.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
         if ($Quiet) {
             & git -C $Repo @GitArgs *> $null
         } else {
-            & git -C $Repo @GitArgs
+            $output = & git -C $Repo @GitArgs 2>&1
+            foreach ($line in @($output)) {
+                Write-Host "$line"
+            }
         }
-        return $LASTEXITCODE
+        return [int]$LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prev
+    }
+}
+
+function Get-VendorPinSha {
+    param([Parameter(Mandatory = $true)][string]$VendorRelPath)
+    $pins = Join-Path $Root "vendor\PINS"
+    foreach ($line in Get-Content $pins) {
+        if ($line -match '^\s*#' -or $line -match '^\s*$') { continue }
+        $parts = $line -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[0] -eq $VendorRelPath) {
+            return $parts[1]
+        }
+    }
+    throw "No pin for $VendorRelPath in vendor/PINS"
+}
+
+function Reset-VendorToPin {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$VendorRelPath
+    )
+    $sha = Get-VendorPinSha $VendorRelPath
+    Write-Host "==> Resetting $VendorRelPath to pin $sha"
+    $reset = Invoke-Git -Repo $Repo -GitArgs @("reset", "--hard", $sha)
+    if ($reset -ne 0) {
+        throw "git reset --hard $sha failed in $Repo (exit $reset)"
+    }
+    # -fd keeps gitignored prebuilts (e.g. moonlight libs/windows).
+    $clean = Invoke-Git -Repo $Repo -GitArgs @("clean", "-fd")
+    if ($clean -ne 0) {
+        throw "git clean -fd failed in $Repo (exit $clean)"
     }
 }
 
@@ -125,36 +160,33 @@ function Apply-SidecarPatches {
         throw "No patches/$Filter files found"
     }
     foreach ($patch in $patches) {
-        $already = Invoke-Git -Repo $Repo -GitArgs @("apply", "--reverse", "--check", $patch.FullName) -Quiet
-        if ($already -eq 0) {
-            Write-Host "Already applied $($patch.Name)"
-            continue
-        }
         Write-Host "==> Applying $($patch.Name)"
-        # Quiet first: git prints "error: patch failed" on overlap even when the
-        # tree already contains the change. Only surface stderr on a real miss.
-        $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName) -Quiet
-        if ($applied -eq 0) {
-            continue
+        $applied = Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName)
+        if ($applied -ne 0) {
+            throw "git apply failed for $($patch.Name) (exit $applied). Vendor tree must be the clean pin."
         }
-        # Later patches can overlap earlier ones, so reverse --check of the
-        # earlier patch fails even though the tree already contains it.
-        $forward = Invoke-Git -Repo $Repo -GitArgs @("apply", "--check", "--whitespace=nowarn", $patch.FullName) -Quiet
-        if ($forward -ne 0) {
-            Write-Host "Already applied $($patch.Name) (later patches overlap)"
-            continue
-        }
-        Invoke-Git -Repo $Repo -GitArgs @("apply", "--whitespace=nowarn", $patch.FullName) | Out-Null
-        throw "git apply failed for $($patch.Name) (exit $applied)"
     }
 }
 
 function Apply-SunshinePatches {
+    Reset-VendorToPin -Repo $SunshineSrc -VendorRelPath "vendor/sunshine"
     Apply-SidecarPatches -Repo $SunshineSrc -Filter "sunshine-*.patch"
 }
 
 function Apply-MoonlightPatches {
+    Reset-VendorToPin -Repo $MoonlightSrc -VendorRelPath "vendor/moonlight-qt"
     Apply-SidecarPatches -Repo $MoonlightSrc -Filter "moonlight-*.patch"
+    # Guard against a silent partial UI apply (Material colors without dialog chrome).
+    $dialog = Join-Path $MoonlightSrc "app\gui\NavigableMessageDialog.qml"
+    $mainCpp = Join-Path $MoonlightSrc "app\main.cpp"
+    $dialogText = Get-Content $dialog -Raw
+    $mainText = Get-Content $mainCpp -Raw
+    if ($dialogText -notmatch 'exclamation\.svg' -or $dialogText -notmatch 'frameColor') {
+        throw "moonlight-02-ui.patch incomplete: NavigableMessageDialog.qml missing Eclipse dialog chrome"
+    }
+    if ($mainText -notmatch 'JetBrains Mono') {
+        throw "moonlight-01-behavior.patch incomplete: main.cpp missing JetBrains Mono app font"
+    }
 }
 
 # Sunshine is a CUI binary. A GUI Eclipse host must not flash a console when

@@ -1,5 +1,5 @@
 Subject: moonlight-01-behavior
-Why: Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, integer-scale fullscreen, splash hold.
+Why: Host-display CLI, Tailscale QHostAddress, headless pair, ECLIPSE_CONTROL hotkeys, fill-client window, display-map popup, splash hold.
 Depends-on: vendor/PINS moonlight-qt; apply before moonlight-02-ui.patch
 
 diff --git a/app/backend/computermanager.cpp b/app/backend/computermanager.cpp
@@ -100,13 +100,13 @@ index 574098a6..d58ea945 100644
 -        emit computerFound(computer);
 +    if (!matchComputer(computer) || !isOnline(computer)) {
 +        return;
-     }
++    }
 +    // Cached PCs often store LAN + WAN next to the Tailscale IP Eclipse
 +    // passed. Polling can mark them online on 192.168.x first; the stream
 +    // then uses that address and video UDP never comes back over 100.x.
 +    if (isAddressLiteral(m_ComputerName) && !activeAddressIs(computer, m_ComputerName)) {
 +        return;
-+    }
+     }
 +    m_ComputerManager->stopPollingAsync();
 +    m_TimeoutTimer->stop();
 +    emit computerFound(computer);
@@ -365,11 +365,350 @@ index ad611f6a..bce6412c 100644
  
  signals:
      void displayModeChanged();
+diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
+new file mode 100644
+index 00000000..ebaf3b85
+--- /dev/null
++++ b/app/streaming/eclipsepopup.cpp
+@@ -0,0 +1,289 @@
++#include "eclipsepopup.h"
++#include "streaming/session.h"
++
++#include <QEventLoop>
++#include <QFontMetrics>
++#include <QGuiApplication>
++#include <QHostAddress>
++#include <QKeyEvent>
++#include <QMouseEvent>
++#include <QPainter>
++#include <QPen>
++#include <QRasterWindow>
++#include <QTcpServer>
++#include <QTcpSocket>
++#include <QThread>
++
++#ifdef Q_OS_WIN32
++#include <process.h>
++#else
++#include <unistd.h>
++#endif
++
++namespace {
++
++const QColor kBg("#0f0f29");
++const QColor kBorder("#f7c708");
++const QColor kText("#d9d9fc");
++const QColor kOkBg("#d9d9fc");
++const QColor kOkFg("#0f0f29");
++
++QByteArray eclipseSend(const char* command, int readyMs = 400)
++{
++    const QByteArray dest = qgetenv("ECLIPSE_CONTROL");
++    if (dest.isEmpty()) {
++        return {};
++    }
++    const QList<QByteArray> parts = dest.split(':');
++    if (parts.size() != 2) {
++        return {};
++    }
++    bool ok = false;
++    const quint16 port = parts.at(1).toUShort(&ok);
++    if (!ok || port == 0) {
++        return {};
++    }
++    QTcpSocket sock;
++    sock.connectToHost(QString::fromUtf8(parts.at(0)), port);
++    if (!sock.waitForConnected(400)) {
++        return {};
++    }
++    sock.write(QByteArray(command) + '\n');
++    sock.flush();
++    sock.waitForBytesWritten(400);
++    sock.waitForReadyRead(readyMs);
++    const QByteArray reply = sock.readAll();
++    sock.disconnectFromHost();
++    return reply;
++}
++
++QString activeDisplayName(int activeIndex, const QString& activeName)
++{
++    if (!activeName.trimmed().isEmpty()) {
++        return activeName.trimmed();
++    }
++    if (activeIndex >= 0) {
++        return QString("Display %1").arg(activeIndex + 1);
++    }
++    return QStringLiteral("Unknown");
++}
++
++QString buildPopupText(const QString& hostList, int activeIndex, const QString& activeName)
++{
++    QString text;
++    text += QStringLiteral("HOST DISPLAYS\n");
++    const QStringList lines = hostList.split('\n', Qt::SkipEmptyParts);
++    bool any = false;
++    for (const QString& line : lines) {
++        const QStringList cols = line.split('\t');
++        if (cols.size() < 3) {
++            continue;
++        }
++        any = true;
++        text += QString("  %1    %2\n").arg(cols.at(1), cols.at(2));
++    }
++    if (!any) {
++        text += QStringLiteral("  No host displays reported.\n");
++    }
++    text += QStringLiteral("\nTHIS WINDOW\n  ");
++    text += activeDisplayName(activeIndex, activeName);
++    return text;
++}
++
++class EclipseDisplayPopup : public QRasterWindow
++{
++public:
++    EclipseDisplayPopup(const QString& text, SDL_Window* anchor)
++        : m_text(text)
++    {
++        setFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
++        setTitle(QStringLiteral("Host displays"));
++        const QFont font = QGuiApplication::font();
++        const QFontMetrics fm(font);
++        const QRect bounds = fm.boundingRect(QRect(0, 0, 400, 2000), Qt::TextWordWrap, m_text);
++        const int width = qBound(340, bounds.width() + 48, 520);
++        const int height = bounds.height() + 96;
++        resize(width, height);
++        if (anchor) {
++            int x = 0;
++            int y = 0;
++            int w = width;
++            int h = height;
++            SDL_GetWindowPosition(anchor, &x, &y);
++            SDL_GetWindowSize(anchor, &w, &h);
++            setPosition(x + (w - width) / 2, y + (h - height) / 2);
++        }
++        m_ok = QRect(width - 88, height - 44, 64, 28);
++    }
++
++protected:
++    void paintEvent(QPaintEvent*) override
++    {
++        QPainter p(this);
++        const QRect bounds(0, 0, width(), height());
++        p.fillRect(bounds, kBg);
++        p.setPen(QPen(kBorder, 1));
++        p.drawRect(bounds.adjusted(0, 0, -1, -1));
++        p.setPen(kText);
++        p.setFont(QGuiApplication::font());
++        p.drawText(QRect(20, 18, width() - 40, height() - 72), Qt::TextWordWrap, m_text);
++        p.fillRect(m_ok, kOkBg);
++        p.setPen(kOkFg);
++        p.drawText(m_ok, Qt::AlignCenter, QStringLiteral("OK"));
++    }
++
++    void keyPressEvent(QKeyEvent* event) override
++    {
++        switch (event->key()) {
++        case Qt::Key_Escape:
++        case Qt::Key_Return:
++        case Qt::Key_Enter:
++        case Qt::Key_Space:
++            close();
++            break;
++        default:
++            break;
++        }
++    }
++
++    void mouseReleaseEvent(QMouseEvent* event) override
++    {
++        if (m_ok.contains(event->position().toPoint())) {
++            close();
++        }
++    }
++
++private:
++    QString m_text;
++    QRect m_ok;
++};
++
++class EclipseUiListener : public QThread
++{
++public:
++    void run() override
++    {
++        QTcpServer server;
++        if (!server.listen(QHostAddress::LocalHost, 0)) {
++            return;
++        }
++        const quint16 port = server.serverPort();
++#ifdef Q_OS_WIN32
++        const unsigned pid = static_cast<unsigned>(_getpid());
++#else
++        const unsigned pid = static_cast<unsigned>(getpid());
++#endif
++        const QByteArray registerCmd =
++            QByteArray("register-ui ") + QByteArray::number(port) + ' ' + QByteArray::number(pid);
++        eclipseSend(registerCmd.constData());
++
++        while (!isInterruptionRequested()) {
++            if (!server.waitForNewConnection(250)) {
++                continue;
++            }
++            QTcpSocket* client = server.nextPendingConnection();
++            if (!client) {
++                continue;
++            }
++            client->waitForReadyRead(400);
++            while (client->bytesAvailable() == 0 && client->waitForReadyRead(50)) {
++            }
++            const QByteArray payload = client->readAll();
++            client->disconnectFromHost();
++            delete client;
++            if (payload.isEmpty()) {
++                continue;
++            }
++            SDL_Event event = {};
++            event.type = SDL_USEREVENT;
++            event.user.code = SDL_CODE_ECLIPSE_DISPLAY_MAP;
++            event.user.data1 = SDL_strdup(payload.constData());
++            if (SDL_PushEvent(&event) < 0) {
++                SDL_free(event.user.data1);
++            }
++        }
++    }
++};
++
++EclipseUiListener* g_listener = nullptr;
++quint32 g_lastPopupTicks = 0;
++
++} // namespace
++
++void eclipseStartUiListener()
++{
++    eclipseStopUiListener();
++    g_listener = new EclipseUiListener();
++    g_listener->start();
++}
++
++void eclipseStopUiListener()
++{
++    if (!g_listener) {
++        return;
++    }
++    g_listener->requestInterruption();
++    g_listener->wait(1000);
++    delete g_listener;
++    g_listener = nullptr;
++}
++
++void eclipseRequestShowDisplays()
++{
++    Session* session = Session::get();
++    if (!session) {
++        return;
++    }
++    const QByteArray reply = eclipseSend("show-displays", 800);
++    QString body = QString::fromUtf8(reply);
++    if (body.startsWith(QLatin1String("ok"))) {
++        const int nl = body.indexOf('\n');
++        body = nl >= 0 ? body.mid(nl + 1) : QString();
++    }
++    else if (body.startsWith(QLatin1String("err"))) {
++        body.clear();
++    }
++    eclipseShowDisplayMapPopup(session->m_Window,
++                               body.trimmed(),
++                               session->m_Preferences->hostDisplayIndex,
++                               qEnvironmentVariable("ECLIPSE_DISPLAY_NAME"));
++}
++
++void eclipseShowDisplayMapPopup(SDL_Window* window,
++                                const QString& hostList,
++                                int activeIndex,
++                                const QString& activeName)
++{
++    const quint32 now = SDL_GetTicks();
++    if (g_lastPopupTicks != 0 && now - g_lastPopupTicks < 400) {
++        return;
++    }
++    g_lastPopupTicks = now;
++
++    Session* session = Session::get();
++    SdlInputHandler* input = session ? session->m_InputHandler : nullptr;
++    const bool recapture = input && input->isCaptureActive();
++    if (input) {
++        input->raiseAllKeys();
++        input->setCaptureActive(false);
++    }
++
++    const QString text = buildPopupText(hostList, activeIndex, activeName);
++    EclipseDisplayPopup popup(text, window);
++    popup.show();
++    popup.raise();
++    popup.requestActivate();
++    popup.setKeyboardGrabEnabled(true);
++
++    QEventLoop loop;
++    QObject::connect(&popup, &QWindow::visibleChanged, &loop, [&]() {
++        if (!popup.isVisible()) {
++            loop.quit();
++        }
++    });
++    loop.exec();
++
++    if (input && recapture) {
++        input->setCaptureActive(true);
++    }
++}
+diff --git a/app/streaming/eclipsepopup.h b/app/streaming/eclipsepopup.h
+new file mode 100644
+index 00000000..6783932c
+--- /dev/null
++++ b/app/streaming/eclipsepopup.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include "SDL_compat.h"
++
++#include <QString>
++
++#define SDL_CODE_ECLIPSE_DISPLAY_MAP 106
++
++/**
++ * @brief Start a localhost listener so Eclipse can open this window's display map.
++ */
++void eclipseStartUiListener();
++
++/**
++ * @brief Stop the Eclipse UI listener thread.
++ */
++void eclipseStopUiListener();
++
++/**
++ * @brief Ask Eclipse for the host display map and show it on this window.
++ */
++void eclipseRequestShowDisplays();
++
++/**
++ * @brief Show the host-display popup over the stream window.
++ *
++ * @param window SDL stream window used to center the popup.
++ * @param hostList Tab-separated lines of index, shortcut, and display name.
++ * @param activeIndex 0-based host display index for this window.
++ * @param activeName Host display name for this window.
++ */
++void eclipseShowDisplayMapPopup(SDL_Window* window,
++                                const QString& hostList,
++                                int activeIndex,
++                                const QString& activeName);
 diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
-index b195f73b..ab6ceb6c 100644
+index b195f73b..be3844a1 100644
 --- a/app/streaming/input/keyboard.cpp
 +++ b/app/streaming/input/keyboard.cpp
-@@ -3,6 +3,15 @@
+@@ -1,8 +1,18 @@
+ #include "streaming/session.h"
++#include "streaming/eclipsepopup.h"
+ 
  #include <Limelight.h>
  #include "SDL_compat.h"
  
@@ -385,7 +724,7 @@ index b195f73b..ab6ceb6c 100644
  #define VK_0 0x30
  #define VK_A 0x41
  
-@@ -13,6 +22,33 @@
+@@ -13,6 +23,33 @@
  #define VK_NUMPAD0 0x60
  #endif
  
@@ -419,7 +758,7 @@ index b195f73b..ab6ceb6c 100644
  void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
  {
      switch (combo) {
-@@ -185,6 +221,46 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+@@ -185,6 +222,52 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
          return;
      }
  
@@ -448,6 +787,12 @@ index b195f73b..ab6ceb6c 100644
 +                eclipseControl("open-all");
 +                return;
 +            }
++            if (event->keysym.sym == SDLK_MINUS ||
++                event->keysym.sym == SDLK_KP_MINUS ||
++                event->keysym.scancode == SDL_SCANCODE_MINUS) {
++                eclipseRequestShowDisplays();
++                return;
++            }
 +            if (event->keysym.sym >= SDLK_1 && event->keysym.sym <= SDLK_9) {
 +                char buf[48];
 +#ifdef Q_OS_WIN32
@@ -467,10 +812,18 @@ index b195f73b..ab6ceb6c 100644
      if ((event->state == SDL_PRESSED) &&
              (event->keysym.mod & KMOD_CTRL) &&
 diff --git a/app/streaming/session.cpp b/app/streaming/session.cpp
-index 40c1e59c..b979ff22 100644
+index 40c1e59c..fe3c0eac 100644
 --- a/app/streaming/session.cpp
 +++ b/app/streaming/session.cpp
-@@ -40,6 +40,8 @@
+@@ -1,6 +1,7 @@
+ #include "session.h"
+ #include "settings/streamingpreferences.h"
+ #include "streaming/streamutils.h"
++#include "streaming/eclipsepopup.h"
+ #include "backend/richpresencemanager.h"
+ 
+ #include <Limelight.h>
+@@ -40,6 +41,8 @@
  #include <QGuiApplication>
  #include <QCursor>
  #include <QScreen>
@@ -479,7 +832,23 @@ index 40c1e59c..b979ff22 100644
  
  #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
  #include <QQuickOpenGLUtils>
-@@ -1504,37 +1506,24 @@ void Session::updateOptimalWindowDisplayMode()
+@@ -1365,8 +1368,13 @@ void Session::getWindowDimensions(int& x, int& y,
+ 
+     SDL_Rect usableBounds;
+     if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
+-        // If the stream resolution fits within the usable display area, use it directly
+-        if (m_StreamConfig.width <= usableBounds.w &&
++        if (!qEnvironmentVariableIsEmpty("ECLIPSE_CONTROL")) {
++            // Eclipse: fill the client's work area. Host aspect ratio is preserved
++            // by the renderer (letterbox or pillarbox, never both).
++            width = usableBounds.w;
++            height = usableBounds.h;
++        }
++        else if (m_StreamConfig.width <= usableBounds.w &&
+             m_StreamConfig.height <= usableBounds.h) {
+             width = m_StreamConfig.width;
+             height = m_StreamConfig.height;
+@@ -1504,37 +1512,27 @@ void Session::updateOptimalWindowDisplayMode()
  
  void Session::toggleFullscreen()
  {
@@ -517,12 +886,15 @@ index 40c1e59c..b979ff22 100644
          getWindowDimensions(x, y, width, height);
          SDL_SetWindowSize(m_Window, width, height);
          SDL_SetWindowPosition(m_Window, x, y);
++        if (!qEnvironmentVariableIsEmpty("ECLIPSE_CONTROL")) {
++            SDL_MaximizeWindow(m_Window);
++        }
      }
 -#endif
  
      // Input handler might need to start/stop keyboard grab after changing modes
      m_InputHandler->updateKeyboardGrabState();
-@@ -1618,7 +1607,8 @@ bool Session::startConnectionAsync()
+@@ -1618,7 +1616,8 @@ bool Session::startConnectionAsync()
                        m_Preferences->playAudioOnHost,
                        m_InputHandler->getAttachedGamepadMask(),
                        !m_Preferences->multiController,
@@ -532,7 +904,7 @@ index 40c1e59c..b979ff22 100644
      } catch (const GfeHttpResponseException& e) {
          emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
          return false;
-@@ -1794,6 +1784,16 @@ void Session::exec()
+@@ -1794,6 +1793,16 @@ void Session::exec()
      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
      QCoreApplication::sendPostedEvents();
  
@@ -549,7 +921,29 @@ index 40c1e59c..b979ff22 100644
      int x, y, width, height;
      getWindowDimensions(x, y, width, height);
  
-@@ -1840,10 +1840,17 @@ void Session::exec()
+@@ -1816,6 +1825,11 @@ void Session::exec()
+     // We always want a resizable window with High DPI enabled
+     Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+ 
++    // Eclipse: fill the client's work area even when the host stream is smaller.
++    if (!m_IsFullScreen && !qEnvironmentVariableIsEmpty("ECLIPSE_CONTROL")) {
++        defaultWindowFlags |= SDL_WINDOW_MAXIMIZED;
++    }
++
+     // If we're starting in windowed mode and the Moonlight GUI is maximized or
+     // minimized, match that with the streaming window.
+     if (!m_IsFullScreen && m_QtWindow != nullptr) {
+@@ -1824,7 +1838,8 @@ void Session::exec()
+         if (m_QtWindow->windowStates() & Qt::WindowMaximized) {
+             defaultWindowFlags |= SDL_WINDOW_MAXIMIZED;
+         }
+-        if (m_QtWindow->windowStates() & Qt::WindowMinimized) {
++        if ((m_QtWindow->windowStates() & Qt::WindowMinimized) &&
++            qEnvironmentVariableIsEmpty("ECLIPSE_CONTROL")) {
+             defaultWindowFlags |= SDL_WINDOW_MINIMIZED;
+         }
+ #else
+@@ -1840,10 +1855,17 @@ void Session::exec()
  
      // We use only the computer name on macOS to match Apple conventions where the
      // app name is featured in the menu bar and the document name is in the title bar.
@@ -569,7 +963,7 @@ index 40c1e59c..b979ff22 100644
  #endif
  
      m_Window = SDL_CreateWindow(windowName.c_str(),
-@@ -1878,7 +1885,7 @@ void Session::exec()
+@@ -1878,7 +1900,7 @@ void Session::exec()
  
      m_InputHandler->setWindow(m_Window);
  
@@ -578,11 +972,63 @@ index 40c1e59c..b979ff22 100644
      QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
      svgImage.fill(0);
  
+@@ -1960,6 +1982,8 @@ void Session::exec()
+     // Switch to async logging mode when we enter the SDL loop
+     StreamUtils::enterAsyncLoggingMode();
+ 
++    eclipseStartUiListener();
++
+     // Hijack this thread to be the SDL main thread. We have to do this
+     // because we want to suspend all Qt processing until the stream is over.
+     SDL_Event event;
+@@ -2036,6 +2060,17 @@ void Session::exec()
+                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
+                                                     (DualSenseOutputReport *)event.user.data2);
+                 break;
++            case SDL_CODE_ECLIPSE_DISPLAY_MAP:
++            {
++                const char* payload = static_cast<const char*>(event.user.data1);
++                const QString hostList = payload ? QString::fromUtf8(payload) : QString();
++                SDL_free(event.user.data1);
++                eclipseShowDisplayMapPopup(m_Window,
++                                           hostList.trimmed(),
++                                           m_Preferences->hostDisplayIndex,
++                                           qEnvironmentVariable("ECLIPSE_DISPLAY_NAME"));
++                break;
++            }
+             default:
+                 SDL_assert(false);
+             }
+@@ -2308,6 +2343,8 @@ void Session::exec()
+     }
+ 
+ DispatchDeferredCleanup:
++    eclipseStopUiListener();
++
+     // Switch back to synchronous logging mode
+     StreamUtils::exitAsyncLoggingMode();
+ 
+diff --git a/app/streaming/session.h b/app/streaming/session.h
+index 53ac9e06..7476880e 100644
+--- a/app/streaming/session.h
++++ b/app/streaming/session.h
+@@ -96,6 +96,11 @@ class Session : public QObject
+     friend class SdlInputHandler;
+     friend class DeferredSessionCleanupTask;
+     friend class AsyncConnectionStartThread;
++    friend void eclipseRequestShowDisplays();
++    friend void eclipseShowDisplayMapPopup(SDL_Window* window,
++                                           const QString& hostList,
++                                           int activeIndex,
++                                           const QString& activeName);
+ 
+ public:
+     explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr);
 diff --git a/app/streaming/streamutils.cpp b/app/streaming/streamutils.cpp
-index 9bd32f50..e1506259 100644
+index 9bd32f50..c0185648 100644
 --- a/app/streaming/streamutils.cpp
 +++ b/app/streaming/streamutils.cpp
-@@ -127,6 +127,25 @@ SDL_Window* StreamUtils::createTestWindow()
+@@ -127,6 +127,11 @@ SDL_Window* StreamUtils::createTestWindow()
  
  void StreamUtils::scaleSourceToDestinationSurface(SDL_Rect* src, SDL_Rect* dst)
  {
@@ -590,21 +1036,7 @@ index 9bd32f50..e1506259 100644
 +        return;
 +    }
 +
-+    // Prefer integer scale so host pixels stay unstretched (letterbox/pillarbox).
-+    int integerScale = dst->w / src->w;
-+    if (dst->h / src->h < integerScale) {
-+        integerScale = dst->h / src->h;
-+    }
-+    if (integerScale >= 1) {
-+        int scaledW = src->w * integerScale;
-+        int scaledH = src->h * integerScale;
-+        dst->x += (dst->w - scaledW) / 2;
-+        dst->y += (dst->h - scaledH) / 2;
-+        dst->w = scaledW;
-+        dst->h = scaledH;
-+        return;
-+    }
-+
++    // Fit the host frame into the client surface (letterbox or pillarbox, never both).
      int dstH = SDL_ceilf((float)dst->w * src->h / src->w);
      int dstW = SDL_ceilf((float)dst->h * src->w / src->h);
  

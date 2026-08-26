@@ -101,6 +101,7 @@ pub fn apply_scale(width: u32, height: u32, denominator: u32) -> (u32, u32) {
         .unwrap_or((width.max(1), height.max(1)))
 }
 
+#[cfg(test)]
 pub fn format_displays(displays: &[DisplayInfo]) -> String {
     if displays.is_empty() {
         return "—".into();
@@ -145,6 +146,7 @@ fn hyprctl_displays() -> Option<Vec<DisplayInfo>> {
     parse_hyprctl_monitors(&String::from_utf8_lossy(&out.stdout))
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_hyprctl_monitors(json: &str) -> Option<Vec<DisplayInfo>> {
     let monitors: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
     let mut out = Vec::new();
@@ -232,6 +234,7 @@ fn drm_displays() -> Option<Vec<DisplayInfo>> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_mode_line(line: &str) -> Option<(u32, u32)> {
     let (w_s, h_s) = line.trim().split_once('x')?;
     let w: u32 = w_s.parse().ok()?;

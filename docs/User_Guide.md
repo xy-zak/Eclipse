@@ -167,6 +167,7 @@ While a Moonlight window is focused:
 | --- | --- |
 | Ctrl+Alt+Esc | Close every window and disconnect |
 | Ctrl+Alt+F | Fullscreen this window (letterboxed, no stretched pixels) |
+| Ctrl+Alt+- | List host displays (every open stream window) |
 | Ctrl+Alt+1–9 | Switch this window to host display N |
 | Ctrl+Alt+0 | One client window per host display |
 | Ctrl+Alt+Q | Close this window (last window disconnects) |
