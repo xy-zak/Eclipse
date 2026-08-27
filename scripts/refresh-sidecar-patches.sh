@@ -115,7 +115,7 @@ write_patch "${MOONLIGHT_SRC}" "${PATCH_DIR}/moonlight-01-behavior.patch" \
   "${MOONLIGHT_BEHAVIOR[@]}"
 write_patch "${MOONLIGHT_SRC}" "${PATCH_DIR}/moonlight-02-ui.patch" \
   "moonlight-02-ui" \
-  "Eclipse connecting splash, dialogs/toasts, moon icon, Remboy/JetBrains, qrc assets. Fonts and ICO are copied at sidecar build, not in this patch." \
+  "Eclipse connecting splash, dialogs/toasts, moon icon, Remboy/JetBrains, qrc assets. Fonts, eclipse.gif, and ICO are copied at sidecar build, not in this patch." \
   "vendor/PINS moonlight-qt; moonlight-01-behavior.patch" \
   "${MOONLIGHT_UI[@]}"
 
@@ -143,4 +143,4 @@ echo "  patches/sunshine-displays.patch"
 echo "  patches/sunshine-sessions.patch"
 echo "  patches/sunshine-cgnat-pair.patch"
 echo
-echo "TTF fonts are not in patches. Rebuild sidecars after refresh."
+echo "TTF fonts and eclipse.gif are not in patches. Rebuild sidecars after refresh."

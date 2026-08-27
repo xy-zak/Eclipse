@@ -1,16 +1,20 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { InfoMenu, Section } from "./InfoPopover";
-import { PixelIcon } from "./PixelIcon";
 import { StatusMark } from "./StatusMark";
 
 const TAILSCALE_DOWNLOADS = "https://tailscale.com/download";
 
 type Props = {
   tailscaleOk: boolean;
+  tailscaleInstalled: boolean;
   message: string | null;
 };
 
-export function TailscalePopover({ tailscaleOk, message }: Props) {
+export function TailscalePopover({
+  tailscaleOk,
+  tailscaleInstalled,
+  message,
+}: Props) {
   const openDownloads = () => {
     void openUrl(TAILSCALE_DOWNLOADS).catch(() => {
       window.open(TAILSCALE_DOWNLOADS, "_blank", "noopener");
@@ -25,14 +29,24 @@ export function TailscalePopover({ tailscaleOk, message }: Props) {
         run <span className="text-tailscale">tailscale up</span> once so the
         node stays on the tailnet after reboot.
       </Section>
-      <div>
+      <div className="flex flex-col gap-2">
         <StatusMark
-          ok={tailscaleOk}
-          label={tailscaleOk ? "Tailscale online" : "Tailscale not ready"}
-          icon={<PixelIcon name="chart-network" size={14} />}
+          ok={tailscaleInstalled}
+          label={
+            tailscaleInstalled
+              ? "Tailscale is installed on this PC"
+              : "Tailscale is not installed on this PC"
+          }
           tone="tailscale"
         />
-        {message ? <p className="mt-2 text-moonlight/70">{message}</p> : null}
+        <StatusMark
+          ok={tailscaleOk}
+          label={
+            tailscaleOk ? "Tailscale is active" : "Tailscale is inactive"
+          }
+          tone="tailscale"
+        />
+        {message ? <p className="mt-1 text-moonlight/70">{message}</p> : null}
       </div>
       <Section title="What Tailscale manages">
         Identity, WireGuard tunnels, NAT traversal, and the CGNAT addresses

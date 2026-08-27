@@ -75,34 +75,3 @@ export function Section({ title, children }: { title: string; children: ReactNod
     </div>
   );
 }
-
-export function HostsInfoPopover() {
-  return (
-    <InfoMenu accent="sunshine" label="Connecting to hosts">
-      <Section title="Other PCs">
-        Each card is another Eclipse machine on your Tailscale network. Connect
-        pairs if needed and opens a Moonlight window on that desktop.
-      </Section>
-      <Section title="When Connect works">
-        The host needs Tailscale online and Eclipse (Sunshine) on. Refresh the
-        list if a PC just woke or you just turned hosting on there. You cannot
-        Connect while this PC is already streaming to a client.
-      </Section>
-      <Section title="Stream quality">
-        The cog sets codec, scale, fps, and bandwidth for the next Connect, and
-        respawns an active stream. Scale is encode size relative to the host
-        monitor; it does not change the host display mode. Monitor names and
-        sizes are on each host card, not in settings.
-      </Section>
-      <Section title="Certificates">
-        If Connect warns that a host certificate changed, trust it only after a
-        reinstall of Eclipse on that PC. App updates do not rotate the
-        certificate.
-      </Section>
-      <Section title="Leaving">
-        Disconnect on the host card, or Ctrl+Alt+Esc in a stream window. Display
-        switching and other shortcuts are under the CLIENT command icon.
-      </Section>
-    </InfoMenu>
-  );
-}

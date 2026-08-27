@@ -1,12 +1,15 @@
 import { InfoMenu, Section } from "./InfoPopover";
-import { PixelIcon } from "./PixelIcon";
 import { StatusMark } from "./StatusMark";
 
 type Props = {
   moonlightPresent: boolean;
+  moonlightActive: boolean;
 };
 
-export function MoonlightPopover({ moonlightPresent }: Props) {
+export function MoonlightPopover({
+  moonlightPresent,
+  moonlightActive,
+}: Props) {
   return (
     <InfoMenu accent="moonlight" icon="moon-solid" label="Moonlight">
       <Section title="This PC’s Moonlight">
@@ -14,21 +17,28 @@ export function MoonlightPopover({ moonlightPresent }: Props) {
         one or more Moonlight windows on that desktop. Eclipse vendors this
         binary; do not install a separate Moonlight from your OS.
       </Section>
-      <div>
+      <div className="flex flex-col gap-2">
         <StatusMark
           ok={moonlightPresent}
           label={
-            moonlightPresent ? "Moonlight binary ready" : "Moonlight binary missing"
+            moonlightPresent
+              ? "Moonlight binary is present"
+              : "Moonlight binary is missing"
           }
-          icon={<PixelIcon name="moon-solid" size={14} />}
         />
-        {!moonlightPresent ? (
-          <p className="mt-2 text-moonlight/70">
-            Rebuild sidecars or reinstall Eclipse. Connect stays disabled until
-            the viewer binary is present.
-          </p>
-        ) : null}
+        <StatusMark
+          ok={moonlightActive}
+          label={
+            moonlightActive ? "Moonlight is active" : "Moonlight is inactive"
+          }
+        />
       </div>
+      {!moonlightPresent ? (
+        <p className="text-moonlight/70">
+          Rebuild sidecars or reinstall Eclipse. Connect stays disabled until
+          the viewer binary is present.
+        </p>
+      ) : null}
       <Section title="How viewing works">
         Moonlight starts only when you Connect. It decodes with this PC’s GPU
         and paints each stream in its own window. Stream quality (codec, scale,

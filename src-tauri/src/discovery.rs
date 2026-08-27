@@ -92,15 +92,25 @@ pub struct DiscoverySnapshot {
     pub local: Option<LocalNode>,
     pub peers: Vec<Peer>,
     pub tailscale_ok: bool,
+    pub tailscale_installed: bool,
     pub message: Option<String>,
 }
 
 impl DiscoverySnapshot {
     pub(crate) fn fail(message: impl Into<String>) -> Self {
+        Self::fail_with(message, false)
+    }
+
+    pub(crate) fn fail_installed(message: impl Into<String>) -> Self {
+        Self::fail_with(message, true)
+    }
+
+    fn fail_with(message: impl Into<String>, installed: bool) -> Self {
         Self {
             local: Some(local_without_tailscale()),
             peers: Vec::new(),
             tailscale_ok: false,
+            tailscale_installed: installed,
             message: Some(message.into()),
         }
     }
@@ -157,14 +167,14 @@ fn list_peers_uncached() -> DiscoverySnapshot {
             );
         }
         Err(err) => {
-            return DiscoverySnapshot::fail(format!("Could not run tailscale: {err}"));
+            return DiscoverySnapshot::fail_installed(format!("Could not run tailscale: {err}"));
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = stderr.trim();
-        return DiscoverySnapshot::fail(if msg.is_empty() {
+        return DiscoverySnapshot::fail_installed(if msg.is_empty() {
             "tailscale status --json failed. Log in with tailscale up.".to_string()
         } else {
             msg.to_string()
@@ -173,7 +183,11 @@ fn list_peers_uncached() -> DiscoverySnapshot {
 
     let json = match String::from_utf8(output.stdout) {
         Ok(s) => s,
-        Err(_) => return DiscoverySnapshot::fail("tailscale status --json was not valid UTF-8."),
+        Err(_) => {
+            return DiscoverySnapshot::fail_installed(
+                "tailscale status --json was not valid UTF-8.",
+            );
+        }
     };
 
     snapshot_from_json(&json, true)
@@ -193,7 +207,9 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
     let status: StatusJson = match serde_json::from_str(json) {
         Ok(s) => s,
         Err(err) => {
-            return DiscoverySnapshot::fail(format!("Could not parse tailscale status: {err}"));
+            return DiscoverySnapshot::fail_installed(format!(
+                "Could not parse tailscale status: {err}"
+            ));
         }
     };
 
@@ -204,7 +220,7 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
         } else {
             format!("Tailscale state is {backend}. Run tailscale up.")
         };
-        return DiscoverySnapshot::fail(hint);
+        return DiscoverySnapshot::fail_installed(hint);
     }
 
     let local = status.self_node.as_ref().map(local_from_self);
@@ -252,6 +268,7 @@ fn snapshot_from_json(json: &str, probe: bool) -> DiscoverySnapshot {
         local,
         peers,
         tailscale_ok: true,
+        tailscale_installed: true,
         message: None,
     }
 }
@@ -514,6 +531,7 @@ mod tests {
     fn parse_skips_self_and_ipv6_only() {
         let snap = snapshot_from_json(FIXTURE, false);
         assert!(snap.tailscale_ok);
+        assert!(snap.tailscale_installed);
         assert!(snap.message.is_none());
         let names: Vec<_> = snap.peers.iter().map(|p| p.hostname.as_str()).collect();
         assert_eq!(names, ["laptop", "work-pc"]);
@@ -553,6 +571,7 @@ mod tests {
     fn stopped_backend_is_not_ok() {
         let snap = snapshot_from_json(r#"{"BackendState":"Stopped"}"#, false);
         assert!(!snap.tailscale_ok);
+        assert!(snap.tailscale_installed);
         assert!(snap.peers.is_empty());
         assert!(snap.message.unwrap().contains("Stopped"));
     }

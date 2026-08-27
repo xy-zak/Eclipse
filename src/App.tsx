@@ -3,9 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "./components/Button";
 import { CertTrustDialog, parseTlsCertChangedHost } from "./components/CertTrustDialog";
 import { ClientPanel, type ClientLink } from "./components/ClientPanel";
+import { EclipseFooterGif } from "./components/EclipseFooterGif";
 import { HostPanel } from "./components/HostPanel";
 import { CommandsPopover } from "./components/CommandsPopover";
-import { HostsInfoPopover } from "./components/InfoPopover";
+import { MentalModelOverlay } from "./components/MentalModelOverlay";
 import { MoonlightPopover } from "./components/MoonlightPopover";
 import { PixelIcon } from "./components/PixelIcon";
 import { StreamSettings } from "./components/StreamSettings";
@@ -71,6 +72,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [refreshPulse, setRefreshPulse] = useState(0);
   const [connectingIp, setConnectingIp] = useState<string | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [certPromptIp, setCertPromptIp] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
@@ -292,6 +294,14 @@ export default function App() {
           <h1 className="font-title text-6xl font-normal uppercase tracking-tight sm:text-7xl">
             Eclipse
           </h1>
+          <button
+            type="button"
+            aria-label="How Eclipse works"
+            className="mt-4 inline-flex h-9 w-9 items-center justify-center border border-moonlight text-moonlight hover:bg-moonlight hover:text-eclipse"
+            onClick={() => setGuideOpen(true)}
+          >
+            <PixelIcon name="info-circle" size={16} />
+          </button>
         </header>
 
         <section className="flex min-w-0 flex-col gap-4">
@@ -302,6 +312,7 @@ export default function App() {
             <div className="flex shrink-0 items-center gap-2">
               <MoonlightPopover
                 moonlightPresent={Boolean(status?.moonlightPresent)}
+                moonlightActive={Boolean(session?.connected)}
               />
               <SunshinePopover
                 sunshinePresent={Boolean(status?.sunshinePresent)}
@@ -314,6 +325,7 @@ export default function App() {
               />
               <TailscalePopover
                 tailscaleOk={Boolean(discovery?.tailscaleOk)}
+                tailscaleInstalled={Boolean(discovery?.tailscaleInstalled)}
                 message={discovery?.message ?? null}
               />
               <CommandsPopover prefs={prefs} onChange={setPrefs} />
@@ -343,7 +355,6 @@ export default function App() {
                 disabled={connectingIp !== null || inbound !== null}
                 onChange={setPrefs}
               />
-              <HostsInfoPopover />
               <Button
                 variant="ghost"
                 className="h-9 w-9 border-sunshine px-0 text-sunshine hover:bg-sunshine hover:text-eclipse disabled:border-sunshine disabled:text-sunshine"
@@ -413,8 +424,14 @@ export default function App() {
             </p>
           ) : null}
         </section>
+
+        <EclipseFooterGif />
         </div>
       </main>
+      <MentalModelOverlay
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+      />
       {certPromptIp ? (
         <CertTrustDialog
           ip={certPromptIp}

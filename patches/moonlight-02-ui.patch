@@ -1,5 +1,5 @@
 Subject: moonlight-02-ui
-Why: Eclipse connecting splash, dialogs/toasts, moon icon, Remboy/JetBrains, qrc assets. Fonts and ICO are copied at sidecar build, not in this patch.
+Why: Eclipse connecting splash, dialogs/toasts, moon icon, Remboy/JetBrains, qrc assets. Fonts, eclipse.gif, and ICO are copied at sidecar build, not in this patch.
 Depends-on: vendor/PINS moonlight-qt; moonlight-01-behavior.patch
 
 diff --git a/app/app.pro b/app/app.pro
@@ -149,10 +149,10 @@ index cc1be12a..60008c66 100644
      ErrorMessageDialog {
 diff --git a/app/gui/EclipseSplash.qml b/app/gui/EclipseSplash.qml
 new file mode 100644
-index 00000000..af32e313
+index 00000000..04659117
 --- /dev/null
 +++ b/app/gui/EclipseSplash.qml
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,141 @@
 +import QtQuick 2.0
 +import QtQuick.Controls 2.2
 +
@@ -178,10 +178,6 @@ index 00000000..af32e313
 +    }
 +
 +    FontLoader {
-+        id: titleFont
-+        source: "qrc:/res/eclipse/Remboy-Regular.ttf"
-+    }
-+    FontLoader {
 +        id: monoFont
 +        source: "qrc:/res/eclipse/JetBrainsMono-Regular.ttf"
 +    }
@@ -192,73 +188,44 @@ index 00000000..af32e313
 +    }
 +
 +    Column {
-+        anchors.centerIn: parent
-+        spacing: 32
++        anchors.fill: parent
 +
-+        Text {
-+            text: "ECLIPSE"
-+            color: root.moonlight
-+            font.family: titleFont.name !== "" ? titleFont.name : "serif"
-+            font.pixelSize: 60
-+            font.weight: Font.Normal
-+            font.capitalization: Font.AllUppercase
-+            anchors.horizontalCenter: parent.horizontalCenter
-+        }
++        Item {
++            width: parent.width
++            height: parent.height * 2 / 3
 +
-+        Row {
-+            id: connectingRow
-+            spacing: 8
-+            anchors.horizontalCenter: parent.horizontalCenter
-+            visible: root.statusOverride !== "" || !root.connected
-+
-+            Image {
-+                source: "qrc:/res/eclipse/spinner.svg"
-+                sourceSize.width: 16
-+                sourceSize.height: 16
-+                width: 16
-+                height: 16
-+                smooth: false
-+                antialiasing: false
-+                asynchronous: false
-+                anchors.verticalCenter: parent.verticalCenter
-+
-+                RotationAnimation on rotation {
-+                    running: connectingRow.visible
-+                    from: 0
-+                    to: 360
-+                    duration: 1000
-+                    loops: Animation.Infinite
++            AnimatedImage {
++                id: splashGif
++                anchors.centerIn: parent
++                readonly property int maxPx: 800
++                width: Math.min(parent.width, maxPx)
++                height: Math.min(parent.height, maxPx)
++                fillMode: Image.PreserveAspectFit
++                source: "qrc:/res/eclipse/eclipse.gif"
++                playing: true
++                cache: false
++                asynchronous: true
++                onPlayingChanged: {
++                    if (!playing) {
++                        currentFrame = 0
++                        playing = true
++                    }
 +                }
 +            }
-+
-+            Text {
-+                text: root.statusText
-+                color: root.moonlight
-+                font.family: monoFont.name !== "" ? monoFont.name : "monospace"
-+                font.pixelSize: 14
-+                anchors.verticalCenter: parent.verticalCenter
-+            }
 +        }
 +
-+        Rectangle {
-+            id: connectedBox
-+            anchors.horizontalCenter: parent.horizontalCenter
-+            visible: root.statusOverride === "" && root.connected
-+            color: root.success
-+            width: connectedRow.implicitWidth + 48
-+            height: connectedRow.implicitHeight + 24
-+
-+            Behavior on color {
-+                ColorAnimation { duration: 180 }
-+            }
++        Item {
++            width: parent.width
++            height: parent.height / 3
 +
 +            Row {
-+                id: connectedRow
++                id: connectingRow
 +                spacing: 8
 +                anchors.centerIn: parent
++                visible: root.statusOverride !== "" || !root.connected
 +
 +                Image {
-+                    source: "qrc:/res/eclipse/check-circle.svg"
++                    source: "qrc:/res/eclipse/spinner.svg"
 +                    sourceSize.width: 16
 +                    sourceSize.height: 16
 +                    width: 16
@@ -267,14 +234,61 @@ index 00000000..af32e313
 +                    antialiasing: false
 +                    asynchronous: false
 +                    anchors.verticalCenter: parent.verticalCenter
++
++                    RotationAnimation on rotation {
++                        running: connectingRow.visible
++                        from: 0
++                        to: 360
++                        duration: 1000
++                        loops: Animation.Infinite
++                    }
 +                }
 +
 +                Text {
 +                    text: root.statusText
-+                    color: root.eclipseBg
++                    color: root.moonlight
 +                    font.family: monoFont.name !== "" ? monoFont.name : "monospace"
 +                    font.pixelSize: 14
 +                    anchors.verticalCenter: parent.verticalCenter
++                }
++            }
++
++            Rectangle {
++                id: connectedBox
++                anchors.centerIn: parent
++                visible: root.statusOverride === "" && root.connected
++                color: root.success
++                width: connectedRow.implicitWidth + 48
++                height: connectedRow.implicitHeight + 24
++
++                Behavior on color {
++                    ColorAnimation { duration: 180 }
++                }
++
++                Row {
++                    id: connectedRow
++                    spacing: 8
++                    anchors.centerIn: parent
++
++                    Image {
++                        source: "qrc:/res/eclipse/check-circle.svg"
++                        sourceSize.width: 16
++                        sourceSize.height: 16
++                        width: 16
++                        height: 16
++                        smooth: false
++                        antialiasing: false
++                        asynchronous: false
++                        anchors.verticalCenter: parent.verticalCenter
++                    }
++
++                    Text {
++                        text: root.statusText
++                        color: root.eclipseBg
++                        font.family: monoFont.name !== "" ? monoFont.name : "monospace"
++                        font.pixelSize: 14
++                        anchors.verticalCenter: parent.verticalCenter
++                    }
 +                }
 +            }
 +        }
@@ -776,10 +790,10 @@ index 00000000..ab27ee4b
 +  <rect x="1" y="11" width="1" height="2"/>
 +</svg>
 diff --git a/app/resources.qrc b/app/resources.qrc
-index 04b71edc..8f2d8520 100644
+index 04b71edc..401dd905 100644
 --- a/app/resources.qrc
 +++ b/app/resources.qrc
-@@ -13,6 +13,13 @@
+@@ -13,6 +13,14 @@
          <file>res/arrow_left.svg</file>
          <file>res/question_mark.svg</file>
          <file>res/moonlight.svg</file>
@@ -790,6 +804,7 @@ index 04b71edc..8f2d8520 100644
 +        <file>res/eclipse/check-circle.svg</file>
 +        <file>res/eclipse/moon-solid.svg</file>
 +        <file>res/eclipse/exclamation.svg</file>
++        <file>res/eclipse/eclipse.gif</file>
          <file>res/update.svg</file>
          <file>res/baseline-help_outline-24px.svg</file>
          <file>res/baseline-error_outline-24px.svg</file>

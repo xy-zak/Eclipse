@@ -146,7 +146,7 @@ Example Linux triple: `x86_64-unknown-linux-gnu`. Tauri `externalBin` is `binari
 
 Sunshine is installed into a local prefix `src-tauri/resources/sunshine-prefix/` (gitignored) so asset paths do not point at `/usr`. CMake is passed `UDEV_RULES_INSTALL_DIR` (and systemd dirs) inside that prefix. Upstream `FindUdev.cmake` otherwise overwrites those dirs from pkg-config (`/usr/lib/udev`); [`patches/sunshine-udev-prefix.patch`](../patches/sunshine-udev-prefix.patch) plus a rewrite of `cmake_install.cmake` keep install inside `PREFIX`. Before configure, both sidecar scripts apply `patches/sunshine-*.patch` and `patches/moonlight-*.patch` (see [`patches/README.md`](../patches/README.md)).
 
-Rebuild sidecars after pulling engine submodule updates, after changing `ECLIPSE_CUDA`, or after changing a patch. TTF fonts are copied from `assets/fonts/` into Moonlight `app/res/eclipse/` at build time; they are not in the patch files.
+Rebuild sidecars after pulling engine submodule updates, after changing `ECLIPSE_CUDA`, or after changing a patch. TTF fonts and `assets/eclipse.gif` are copied from `assets/` into Moonlight `app/res/eclipse/` at build time; they are not in the patch files.
 
 #### Sidecar patches
 

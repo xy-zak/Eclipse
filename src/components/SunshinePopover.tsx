@@ -62,12 +62,6 @@ export function SunshinePopover({
 
   const hostToggleDisabled = hostBusy || !sunshinePresent;
 
-  const statusLabel = !sunshinePresent
-    ? "Sunshine binary missing"
-    : sunshineRunning
-      ? "Host streaming on"
-      : "Host streaming off";
-
   return (
     <Popover className={({ open }) => (open ? "relative z-50 isolate" : "")}>
       {({ open }) => (
@@ -98,12 +92,24 @@ export function SunshinePopover({
               desktop. Turn it off here or from the tray when you do not want
               that.
             </p>
-            <div className="mt-3">
+            <div className="mt-3 flex flex-col gap-2">
               <StatusMark
-                ok={sunshinePresent && sunshineRunning}
-                label={statusLabel}
+                ok={sunshinePresent}
+                label={
+                  sunshinePresent
+                    ? "Sunshine binary is present"
+                    : "Sunshine binary is missing"
+                }
                 tone="sunshine"
-                icon={<PixelIcon name="sun-solid" size={14} />}
+              />
+              <StatusMark
+                ok={sunshineRunning}
+                label={
+                  sunshineRunning
+                    ? "Sunshine is active"
+                    : "Sunshine is inactive"
+                }
+                tone="sunshine"
               />
             </div>
             {sunshineRunning ? (

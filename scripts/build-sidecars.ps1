@@ -307,6 +307,9 @@ foreach ($font in @("Remboy-Regular.ttf", "JetBrainsMono-Regular.ttf")) {
     if (-not (Test-Path $src)) { throw "Missing Eclipse font $src" }
     Copy-Item $src $moonFontDir -Force
 }
+$gifSrc = Join-Path $Root "assets\eclipse.gif"
+if (-not (Test-Path $gifSrc)) { throw "Missing Eclipse splash $gifSrc" }
+Copy-Item $gifSrc $moonFontDir -Force
 $moonIco = Join-Path $Root "src-tauri\icons\moonlight.ico"
 if (Test-Path $moonIco) {
     Copy-Item $moonIco (Join-Path $MoonlightSrc "app\moonlight.ico") -Force

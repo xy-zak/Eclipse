@@ -27,6 +27,8 @@ Each file starts with `Subject:` / `Why:` / `Depends-on:`.
   `JetBrainsMono-Regular.ttf` are copied into
   `vendor/moonlight-qt/app/res/eclipse/` at sidecar build time. The React
   dashboard uses the WOFF2 Remboy face plus `@fontsource/jetbrains-mono`.
+- **Connecting GIF.** `assets/eclipse.gif` is copied next to those fonts at
+  sidecar build (not in the patch). The dashboard imports the same file.
 - **Windows ICO files.** `scripts/brand-sidecar-icons.py` writes
   `src-tauri/icons/moonlight.ico` and `sunshine.ico` from the pixel SVGs.
   Sidecar builds copy those over `moonlight.ico` / Sunshine's icon path.

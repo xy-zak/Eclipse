@@ -42,6 +42,7 @@ export type DiscoverySnapshot = {
   local: LocalNode | null;
   peers: Peer[];
   tailscaleOk: boolean;
+  tailscaleInstalled: boolean;
   message: string | null;
 };
 

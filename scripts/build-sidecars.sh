@@ -218,7 +218,12 @@ if [[ ! -f "${ROOT}/assets/fonts/Remboy-Regular.ttf" || ! -f "${ROOT}/assets/fon
   echo "Missing Eclipse fonts in assets/fonts (Remboy-Regular.ttf, JetBrainsMono-Regular.ttf)" >&2
   exit 1
 fi
+if [[ ! -f "${ROOT}/assets/eclipse.gif" ]]; then
+  echo "Missing assets/eclipse.gif" >&2
+  exit 1
+fi
 cp "${ROOT}/assets/fonts/Remboy-Regular.ttf" "${ROOT}/assets/fonts/JetBrainsMono-Regular.ttf" \
+  "${ROOT}/assets/eclipse.gif" \
   "${MOONLIGHT_SRC}/app/res/eclipse/"
 if [[ -f "${ROOT}/src-tauri/icons/moonlight.ico" ]]; then
   cp "${ROOT}/src-tauri/icons/moonlight.ico" "${MOONLIGHT_SRC}/app/moonlight.ico"
