@@ -16,24 +16,31 @@ type Props = {
   sunshinePresent: boolean;
   sunshineRunning: boolean;
   keepHostOnExit: boolean;
+  hostStartOnBoot: boolean;
+  hostServiceInstalled: boolean;
   onOpenHostAdmin: () => void;
   onCopyWebUiPassword: () => Promise<void>;
   onSetHostRunning: (on: boolean) => Promise<void>;
   onSetKeepHostOnExit: (on: boolean) => Promise<void>;
+  onSetHostStartOnBoot: (on: boolean) => Promise<void>;
 };
 
 export function SunshinePopover({
   sunshinePresent,
   sunshineRunning,
   keepHostOnExit,
+  hostStartOnBoot,
+  hostServiceInstalled,
   onOpenHostAdmin,
   onCopyWebUiPassword,
   onSetHostRunning,
   onSetKeepHostOnExit,
+  onSetHostStartOnBoot,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [hostBusy, setHostBusy] = useState(false);
   const [keepBusy, setKeepBusy] = useState(false);
+  const [bootBusy, setBootBusy] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
   const copyPassword = () => {
@@ -60,7 +67,13 @@ export function SunshinePopover({
     void onSetKeepHostOnExit(on).finally(() => setKeepBusy(false));
   };
 
+  const setStartOnBoot = (on: boolean) => {
+    setBootBusy(true);
+    void onSetHostStartOnBoot(on).finally(() => setBootBusy(false));
+  };
+
   const hostToggleDisabled = hostBusy || !sunshinePresent;
+  const bootToggleDisabled = bootBusy || !hostServiceInstalled;
 
   return (
     <Popover className={({ open }) => (open ? "relative z-50 isolate" : "")}>
@@ -134,8 +147,7 @@ export function SunshinePopover({
             <p className="mt-3 text-moonlight/70">
               Closing the window hides Eclipse to the tray. Quit Eclipse exits
               the app. Leave the host running after quit so other PCs can still
-              Connect, or stop it when you quit. A packaged host still starts
-              again at reboot.
+              Connect, or stop it when you quit.
             </p>
             {keepHostOnExit ? (
               <Button
@@ -154,6 +166,32 @@ export function SunshinePopover({
                 className="mt-3 w-full border border-sunshine bg-eclipse px-3 py-1.5 text-sm font-medium text-sunshine hover:border-success hover:bg-success hover:text-eclipse disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Keep Sunshine Host running in background
+              </button>
+            )}
+            <p className="mt-3 text-moonlight/70">
+              Auto-start hosting on reboot starts Sunshine when this PC boots,
+              even before anyone logs in. Turn it off if you only want hosting
+              when you start it from Eclipse.
+            </p>
+            {hostStartOnBoot ? (
+              <Button
+                variant="fail"
+                className="mt-3 w-full"
+                disabled={bootToggleDisabled}
+                onClick={() => setStartOnBoot(false)}
+              >
+                {bootBusy
+                  ? "Updating…"
+                  : "Turn off auto-start hosting on reboot"}
+              </Button>
+            ) : (
+              <button
+                type="button"
+                disabled={bootToggleDisabled}
+                onClick={() => setStartOnBoot(true)}
+                className="mt-3 w-full border border-sunshine bg-eclipse px-3 py-1.5 text-sm font-medium text-sunshine hover:border-success hover:bg-success hover:text-eclipse disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {bootBusy ? "Updating…" : "Auto-start hosting on reboot"}
               </button>
             )}
             <p className="mt-3 text-moonlight/70">

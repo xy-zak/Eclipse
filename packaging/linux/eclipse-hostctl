@@ -1,6 +1,7 @@
 #!/bin/sh
-# Privileged helper so a logged-in user can start/stop eclipse-host.service
-# without a full root shell. Invoked via pkexec from the Eclipse tray.
+# Privileged helper so a logged-in user can start/stop/enable/disable
+# eclipse-host.service without a full root shell. Invoked via pkexec from
+# the Eclipse tray and CLIENT Sunshine dropdown.
 set -e
 unit="eclipse-host.service"
 action="${1:-}"
@@ -11,6 +12,12 @@ case "$action" in
   stop)
     systemctl stop "$unit"
     ;;
+  enable)
+    systemctl enable "$unit"
+    ;;
+  disable)
+    systemctl disable "$unit"
+    ;;
   status)
     if systemctl is-active --quiet "$unit"; then
       echo running
@@ -20,7 +27,7 @@ case "$action" in
     exit 1
     ;;
   *)
-    echo "usage: eclipse-hostctl start|stop|status" >&2
+    echo "usage: eclipse-hostctl start|stop|status|enable|disable" >&2
     exit 2
     ;;
 esac

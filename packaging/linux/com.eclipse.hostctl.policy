@@ -7,7 +7,7 @@
   <vendor_url>https://github.com</vendor_url>
   <action id="com.eclipse.hostctl">
     <description>Control the Eclipse Sunshine host service</description>
-    <message>Authentication is required to start or stop the Eclipse host</message>
+    <message>Authentication is required to control the Eclipse host</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

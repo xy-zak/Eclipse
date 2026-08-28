@@ -5,7 +5,7 @@ export function TitleBar() {
   const win = () => getCurrentWindow();
 
   return (
-    <header className="flex h-9 shrink-0 items-stretch border-b border-moonlight bg-eclipse">
+    <header className="relative z-[60] flex h-9 shrink-0 items-stretch border-b border-moonlight bg-eclipse">
       <div className="flex-1" data-tauri-drag-region />
       <div className="flex">
         <button

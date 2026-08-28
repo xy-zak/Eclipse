@@ -715,6 +715,27 @@ impl HostProcess {
         *self.keep_on_exit.lock().unwrap_or_else(|e| e.into_inner()) = on;
         save_keep_on_exit(on);
     }
+
+    pub fn host_start_on_boot(&self) -> bool {
+        host_service_installed() && host_service_enabled()
+    }
+
+    pub fn host_service_installed(&self) -> bool {
+        host_service_installed()
+    }
+
+    /// Enable or disable the packaged host service at boot. Does not start or
+    /// stop a currently running host.
+    pub fn set_host_start_on_boot(&self, on: bool) -> Result<(), String> {
+        if !host_service_installed() {
+            return Err("start-on-boot requires the packaged host service".into());
+        }
+        if on {
+            enable_host_service()
+        } else {
+            disable_host_service()
+        }
+    }
 }
 
 fn wait_for(pred: impl Fn() -> bool, timeout: Duration) -> bool {
@@ -828,12 +849,22 @@ fn stop_host_service() -> Result<(), String> {
     control_host_service("stop")
 }
 
+fn enable_host_service() -> Result<(), String> {
+    control_host_service("enable")
+}
+
+fn disable_host_service() -> Result<(), String> {
+    control_host_service("disable")
+}
+
 fn control_host_service(action: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         match action {
             "start" => windows_scm::start(WINDOWS_HOST_SERVICE),
             "stop" => windows_scm::stop(WINDOWS_HOST_SERVICE),
+            "enable" => windows_scm::set_autostart(WINDOWS_HOST_SERVICE, true),
+            "disable" => windows_scm::set_autostart(WINDOWS_HOST_SERVICE, false),
             other => Err(format!("unsupported host service action: {other}")),
         }
     }
@@ -861,6 +892,12 @@ fn control_host_service(action: &str) -> Result<(), String> {
         if action == "stop" && !host_service_active() {
             return Ok(());
         }
+        if action == "enable" && host_service_enabled() {
+            return Ok(());
+        }
+        if action == "disable" && !host_service_enabled() {
+            return Ok(());
+        }
         Err(format!(
             "could not {action} {LINUX_HOST_SERVICE} (install polkit helper or run as root)"
         ))
@@ -882,16 +919,37 @@ fn host_service_active() -> bool {
     }
 }
 
+fn host_service_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        windows_scm::autostart(WINDOWS_HOST_SERVICE)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("systemctl")
+            .args(["is-enabled", "--quiet", LINUX_HOST_SERVICE])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Query the Service Control Manager without spawning `sc.exe` (a console app).
 #[cfg(windows)]
 mod windows_scm {
     use std::ptr;
 
     const SC_MANAGER_CONNECT: u32 = 0x0001;
+    const SERVICE_QUERY_CONFIG: u32 = 0x0001;
+    const SERVICE_CHANGE_CONFIG: u32 = 0x0002;
     const SERVICE_QUERY_STATUS: u32 = 0x0004;
     const SERVICE_START: u32 = 0x0010;
     const SERVICE_STOP: u32 = 0x0020;
     const SERVICE_RUNNING: u32 = 0x0004;
+    const SERVICE_AUTO_START: u32 = 0x0000_0002;
+    const SERVICE_DEMAND_START: u32 = 0x0000_0003;
+    const SERVICE_NO_CHANGE: u32 = 0xFFFF_FFFF;
+    const SERVICE_CONFIG_DELAYED_AUTO_START_INFO: u32 = 3;
     const SERVICE_CONTROL_STOP: u32 = 0x0001;
     const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
     const ERROR_SERVICE_NOT_ACTIVE: u32 = 1062;
@@ -907,6 +965,24 @@ mod windows_scm {
         wait_hint: u32,
     }
 
+    #[repr(C)]
+    struct QueryServiceConfig {
+        service_type: u32,
+        start_type: u32,
+        error_control: u32,
+        binary_path: *mut u16,
+        load_order_group: *mut u16,
+        tag_id: u32,
+        dependencies: *mut u16,
+        service_start_name: *mut u16,
+        display_name: *mut u16,
+    }
+
+    #[repr(C)]
+    struct DelayedAutoStartInfo {
+        delayed: i32,
+    }
+
     #[link(name = "advapi32")]
     extern "system" {
         fn OpenSCManagerW(
@@ -920,6 +996,30 @@ mod windows_scm {
             access: u32,
         ) -> *mut core::ffi::c_void;
         fn QueryServiceStatus(svc: *mut core::ffi::c_void, status: *mut ServiceStatus) -> i32;
+        fn QueryServiceConfigW(
+            svc: *mut core::ffi::c_void,
+            config: *mut QueryServiceConfig,
+            buf_size: u32,
+            bytes_needed: *mut u32,
+        ) -> i32;
+        fn ChangeServiceConfigW(
+            svc: *mut core::ffi::c_void,
+            service_type: u32,
+            start_type: u32,
+            error_control: u32,
+            binary_path: *const u16,
+            load_order_group: *const u16,
+            tag_id: *mut u32,
+            dependencies: *const u16,
+            service_start_name: *const u16,
+            password: *const u16,
+            display_name: *const u16,
+        ) -> i32;
+        fn ChangeServiceConfig2W(
+            svc: *mut core::ffi::c_void,
+            info_level: u32,
+            info: *mut core::ffi::c_void,
+        ) -> i32;
         fn StartServiceW(
             svc: *mut core::ffi::c_void,
             args: u32,
@@ -1043,6 +1143,108 @@ mod windows_scm {
         }
     }
 
+    pub fn start_type_is_autostart(start_type: u32) -> bool {
+        start_type == SERVICE_AUTO_START
+    }
+
+    pub fn autostart(name: &str) -> bool {
+        start_type(name).is_some_and(start_type_is_autostart)
+    }
+
+    fn start_type(name: &str) -> Option<u32> {
+        let name_w = wide(name);
+        unsafe {
+            let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+            if scm.is_null() {
+                return None;
+            }
+            let svc = OpenServiceW(scm, name_w.as_ptr(), SERVICE_QUERY_CONFIG);
+            if svc.is_null() {
+                CloseServiceHandle(scm);
+                return None;
+            }
+            let mut needed = 0u32;
+            QueryServiceConfigW(svc, ptr::null_mut(), 0, &mut needed);
+            if needed == 0 {
+                CloseServiceHandle(svc);
+                CloseServiceHandle(scm);
+                return None;
+            }
+            let words = (needed as usize).div_ceil(8);
+            let mut buf = vec![0u64; words];
+            let mut needed2 = 0u32;
+            let ok = QueryServiceConfigW(
+                svc,
+                buf.as_mut_ptr().cast(),
+                (words * 8) as u32,
+                &mut needed2,
+            );
+            let start = if ok != 0 {
+                Some((*buf.as_ptr().cast::<QueryServiceConfig>()).start_type)
+            } else {
+                None
+            };
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            start
+        }
+    }
+
+    pub fn set_autostart(name: &str, on: bool) -> Result<(), String> {
+        let name_w = wide(name);
+        unsafe {
+            let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+            if scm.is_null() {
+                return Err("OpenSCManagerW failed".into());
+            }
+            let svc = OpenServiceW(
+                scm,
+                name_w.as_ptr(),
+                SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG,
+            );
+            if svc.is_null() {
+                CloseServiceHandle(scm);
+                return Err(format!("service {name} was not found"));
+            }
+            let start_type = if on {
+                SERVICE_AUTO_START
+            } else {
+                SERVICE_DEMAND_START
+            };
+            let ok = ChangeServiceConfigW(
+                svc,
+                SERVICE_NO_CHANGE,
+                start_type,
+                SERVICE_NO_CHANGE,
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            );
+            let err = if ok == 0 { GetLastError() } else { 0 };
+            if ok != 0 && on {
+                let mut delayed = DelayedAutoStartInfo { delayed: 1 };
+                let _ = ChangeServiceConfig2W(
+                    svc,
+                    SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                    (&mut delayed as *mut DelayedAutoStartInfo).cast(),
+                );
+            }
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "ChangeServiceConfigW({name}) failed (win32 {err})"
+                ))
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn wide_nul_len(name: &str) -> usize {
         wide(name).len()
@@ -1056,6 +1258,8 @@ pub struct SidecarStatus {
     pub moonlight_present: bool,
     pub sunshine_running: bool,
     pub keep_host_on_exit: bool,
+    pub host_start_on_boot: bool,
+    pub host_service_installed: bool,
     pub host_triple: String,
 }
 
@@ -1066,6 +1270,8 @@ impl SidecarStatus {
             moonlight_present: MOONLIGHT.is_present(),
             sunshine_running: host.sunshine_running(),
             keep_host_on_exit: host.keep_host_on_exit(),
+            host_start_on_boot: host.host_start_on_boot(),
+            host_service_installed: host.host_service_installed(),
             host_triple: env!("HOST_TRIPLE").to_string(),
         }
     }
@@ -1100,6 +1306,33 @@ mod tests {
         let missing = "EclipseNoSuchService7e5d5a7e";
         assert!(windows_scm::start(missing).unwrap_err().contains("not found"));
         assert!(windows_scm::stop(missing).unwrap_err().contains("not found"));
+        assert!(
+            windows_scm::set_autostart(missing, true)
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert!(!windows_scm::autostart(missing));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scm_auto_start_is_only_service_auto_start() {
+        assert!(windows_scm::start_type_is_autostart(0x0000_0002));
+        assert!(!windows_scm::start_type_is_autostart(0x0000_0003));
+        assert!(!windows_scm::start_type_is_autostart(0x0000_0004));
+        assert!(!windows_scm::start_type_is_autostart(0));
+    }
+
+    #[test]
+    fn set_host_start_on_boot_requires_installed_service() {
+        if host_service_installed() {
+            return;
+        }
+        let host = HostProcess::new();
+        assert!(!host.host_start_on_boot());
+        assert!(!host.host_service_installed());
+        let err = host.set_host_start_on_boot(true).unwrap_err();
+        assert!(err.contains("packaged host service"), "{err}");
     }
 
     #[test]

@@ -8,6 +8,7 @@ import command from "../assets/icons/command.svg?raw";
 import expand from "../assets/icons/expand.svg?raw";
 import infoCircle from "../assets/icons/info-circle.svg?raw";
 import minus from "../assets/icons/minus.svg?raw";
+import questionCircle from "../assets/icons/question-circle.svg?raw";
 import moonSolid from "../assets/icons/moon-solid.svg?raw";
 import sparklesSolid from "../assets/icons/sparkles-solid.svg?raw";
 import spinner from "../assets/icons/spinner.svg?raw";
@@ -31,6 +32,7 @@ const ICONS = {
   cog,
   command,
   "info-circle": infoCircle,
+  "question-circle": questionCircle,
   analytics,
   clock,
 } as const;

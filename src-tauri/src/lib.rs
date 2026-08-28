@@ -29,6 +29,8 @@ async fn sidecar_status(app: tauri::AppHandle) -> SidecarStatus {
         moonlight_present: false,
         sunshine_running: false,
         keep_host_on_exit: false,
+        host_start_on_boot: false,
+        host_service_installed: false,
         host_triple: env!("HOST_TRIPLE").to_string(),
     })
 }
@@ -90,6 +92,15 @@ async fn set_host_running(app: tauri::AppHandle, on: bool) -> Result<(), String>
 #[tauri::command]
 fn set_keep_host_on_exit(app: tauri::AppHandle, on: bool) {
     app.state::<HostProcess>().set_keep_host_on_exit(on);
+}
+
+#[tauri::command]
+async fn set_host_start_on_boot(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<HostProcess>().set_host_start_on_boot(on)
+    })
+    .await
+    .map_err(|err| format!("Start-on-boot toggle failed: {err}"))?
 }
 
 #[tauri::command]
@@ -247,6 +258,7 @@ pub fn run() {
             open_host_admin,
             set_host_running,
             set_keep_host_on_exit,
+            set_host_start_on_boot,
             peer_latency,
             set_stream_prefs,
             open_all_displays

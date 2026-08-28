@@ -3,6 +3,8 @@ export type SidecarStatus = {
   moonlightPresent: boolean;
   sunshineRunning: boolean;
   keepHostOnExit: boolean;
+  hostStartOnBoot: boolean;
+  hostServiceInstalled: boolean;
   hostTriple: string;
 };
 

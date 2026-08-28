@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "./components/Button";
 import { CertTrustDialog, parseTlsCertChangedHost } from "./components/CertTrustDialog";
 import { ClientPanel, type ClientLink } from "./components/ClientPanel";
-import { EclipseFooterGif } from "./components/EclipseFooterGif";
 import { HostPanel } from "./components/HostPanel";
 import { CommandsPopover } from "./components/CommandsPopover";
+import { AboutOverlay } from "./components/AboutOverlay";
 import { MentalModelOverlay } from "./components/MentalModelOverlay";
 import { MoonlightPopover } from "./components/MoonlightPopover";
 import { PixelIcon } from "./components/PixelIcon";
@@ -73,6 +73,7 @@ export default function App() {
   const [refreshPulse, setRefreshPulse] = useState(0);
   const [connectingIp, setConnectingIp] = useState<string | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [certPromptIp, setCertPromptIp] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [throughputMbps, setThroughputMbps] = useState<number | null>(null);
@@ -243,6 +244,17 @@ export default function App() {
     }
   };
 
+  const setHostStartOnBoot = async (on: boolean) => {
+    setError(null);
+    try {
+      await invoke("set_host_start_on_boot", { on });
+      setStatus(await invoke<SidecarStatus>("sidecar_status"));
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
+  };
+
   const copyWebUiPassword = async () => {
     setError(null);
     try {
@@ -290,18 +302,36 @@ export default function App() {
       <TitleBar />
       <main className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto">
         <div className="mx-auto flex w-full min-w-0 max-w-[1080px] flex-col gap-8 px-6 py-6 sm:px-8 sm:py-8">
-        <header className="flex shrink-0 flex-col items-center text-center">
-          <h1 className="font-title text-6xl font-normal uppercase tracking-tight sm:text-7xl">
-            Eclipse
-          </h1>
-          <button
-            type="button"
-            aria-label="How Eclipse works"
-            className="mt-4 inline-flex h-9 w-9 items-center justify-center border border-moonlight text-moonlight hover:bg-moonlight hover:text-eclipse"
-            onClick={() => setGuideOpen(true)}
-          >
-            <PixelIcon name="info-circle" size={16} />
-          </button>
+        <header className="flex flex-col items-center gap-3">
+          <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center">
+            <span aria-hidden />
+            <h1 className="font-title inline-flex items-center gap-3 text-7xl font-normal uppercase tracking-tight sm:gap-4 sm:text-[5.25rem]">
+              <PixelIcon name="sparkles-solid" size={56} />
+              Eclipse
+              <PixelIcon name="sparkles-solid" size={56} className="-scale-x-100" />
+            </h1>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                aria-label="How Eclipse works"
+                className="inline-flex h-9 w-9 items-center justify-center border border-moonlight text-moonlight hover:bg-moonlight hover:text-eclipse"
+                onClick={() => setGuideOpen(true)}
+              >
+                <PixelIcon name="info-circle" size={16} />
+              </button>
+              <button
+                type="button"
+                aria-label="About Eclipse"
+                className="inline-flex h-9 w-9 items-center justify-center border border-moonlight text-moonlight hover:bg-moonlight hover:text-eclipse"
+                onClick={() => setAboutOpen(true)}
+              >
+                <PixelIcon name="question-circle" size={16} />
+              </button>
+            </div>
+          </div>
+          <p className="max-w-xl text-center text-sm leading-relaxed text-moonlight/70">
+            the free, open-source and cross-platform remote-desktop app
+          </p>
         </header>
 
         <section className="flex min-w-0 flex-col gap-4">
@@ -318,10 +348,13 @@ export default function App() {
                 sunshinePresent={Boolean(status?.sunshinePresent)}
                 sunshineRunning={Boolean(status?.sunshineRunning)}
                 keepHostOnExit={Boolean(status?.keepHostOnExit)}
+                hostStartOnBoot={Boolean(status?.hostStartOnBoot)}
+                hostServiceInstalled={Boolean(status?.hostServiceInstalled)}
                 onOpenHostAdmin={openHostAdmin}
                 onCopyWebUiPassword={copyWebUiPassword}
                 onSetHostRunning={setHostRunning}
                 onSetKeepHostOnExit={setKeepHostOnExit}
+                onSetHostStartOnBoot={setHostStartOnBoot}
               />
               <TailscalePopover
                 tailscaleOk={Boolean(discovery?.tailscaleOk)}
@@ -424,14 +457,13 @@ export default function App() {
             </p>
           ) : null}
         </section>
-
-        <EclipseFooterGif />
         </div>
       </main>
       <MentalModelOverlay
         open={guideOpen}
         onClose={() => setGuideOpen(false)}
       />
+      <AboutOverlay open={aboutOpen} onClose={() => setAboutOpen(false)} />
       {certPromptIp ? (
         <CertTrustDialog
           ip={certPromptIp}
