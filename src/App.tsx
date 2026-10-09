@@ -27,6 +27,10 @@ const DEFAULT_PREFS: StreamPrefs = {
   codec: "H.264",
   bitrateMbps: 20,
   hotkeyShift: false,
+  gameMouse: false,
+  systemKeys: "fullscreen",
+  audioOnHost: false,
+  audioChannels: "stereo",
 };
 
 function formatMbps(mbps: number | null): string {
@@ -60,6 +64,10 @@ function prefsFromSession(session: SessionStatus | null): StreamPrefs {
     codec: session.codec || DEFAULT_PREFS.codec,
     bitrateMbps: session.bitrateMbps || DEFAULT_PREFS.bitrateMbps,
     hotkeyShift: Boolean(session.hotkeyShift),
+    gameMouse: Boolean(session.gameMouse),
+    systemKeys: session.systemKeys || DEFAULT_PREFS.systemKeys,
+    audioOnHost: Boolean(session.audioOnHost),
+    audioChannels: session.audioChannels || DEFAULT_PREFS.audioChannels,
   };
 }
 

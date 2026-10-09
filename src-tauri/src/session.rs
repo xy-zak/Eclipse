@@ -45,7 +45,6 @@ pub fn stream_args(
     width: u32,
     height: u32,
     display_index: Option<usize>,
-    audio: bool,
     prefs: &StreamPrefs,
     display_map: &str,
 ) -> Vec<String> {
@@ -62,16 +61,35 @@ pub fn stream_args(
         "--no-hdr".into(),
         "--packet-size".into(),
         "1024".into(),
-        "--absolute-mouse".into(),
+        // Desktop mode sends absolute positions, which pin at the window edge.
+        // Game mode sends relative deltas so aim keeps turning (raw input).
+        if prefs.game_mouse {
+            "--no-absolute-mouse".into()
+        } else {
+            "--absolute-mouse".into()
+        },
         "--display-mode".into(),
         "windowed".into(),
+        // Pin every input/audio option. Anything left out is read from the
+        // Moonlight.conf that stock Moonlight shares, so it varies per machine.
+        "--capture-system-keys".into(),
+        prefs.system_keys.clone(),
+        "--audio-config".into(),
+        prefs.audio_channels.clone(),
+        if prefs.audio_on_host {
+            "--audio-on-host".into()
+        } else {
+            "--no-audio-on-host".into()
+        },
+        // Extra display windows are muted with ECLIPSE_AUDIO=0, not by focus.
+        "--no-mute-on-focus-loss".into(),
+        "--no-mouse-buttons-swap".into(),
+        "--no-reverse-scroll-direction".into(),
+        "--no-touchscreen-trackpad".into(),
     ];
     if let Some(index) = display_index {
         args.push("--host-display".into());
         args.push(index.to_string());
-    }
-    if !audio {
-        args.push("--mute-on-focus-loss".into());
     }
     // Options must come before host/app. QCommandLineParser treats flags after
     // the positional "Desktop" as extra positionals, so the map would be dropped.
@@ -235,6 +253,25 @@ pub struct StreamPrefs {
     pub bitrate_mbps: u32,
     #[serde(default)]
     pub hotkey_shift: bool,
+    #[serde(default)]
+    pub game_mouse: bool,
+    #[serde(default = "default_system_keys")]
+    pub system_keys: String,
+    #[serde(default)]
+    pub audio_on_host: bool,
+    #[serde(default = "default_audio_channels")]
+    pub audio_channels: String,
+}
+
+const SYSTEM_KEYS: [&str; 3] = ["never", "fullscreen", "always"];
+const AUDIO_CHANNELS: [&str; 3] = ["stereo", "5.1-surround", "7.1-surround"];
+
+fn default_system_keys() -> String {
+    "fullscreen".into()
+}
+
+fn default_audio_channels() -> String {
+    "stereo".into()
 }
 
 impl Default for StreamPrefs {
@@ -245,6 +282,10 @@ impl Default for StreamPrefs {
             codec: DEFAULT_CODEC.into(),
             bitrate_mbps: DEFAULT_BITRATE_MBPS,
             hotkey_shift: false,
+            game_mouse: false,
+            system_keys: default_system_keys(),
+            audio_on_host: false,
+            audio_channels: default_audio_channels(),
         }
     }
 }
@@ -261,6 +302,12 @@ fn validate_prefs(prefs: StreamPrefs) -> Result<StreamPrefs, String> {
     }
     if !matches!(prefs.bitrate_mbps, 10 | 20 | 50) {
         return Err("Max bandwidth must be 10, 20, or 50 Mb/s.".into());
+    }
+    if !SYSTEM_KEYS.contains(&prefs.system_keys.as_str()) {
+        return Err("System keys must be Off, Fullscreen, or Always.".into());
+    }
+    if !AUDIO_CHANNELS.contains(&prefs.audio_channels.as_str()) {
+        return Err("Audio must be Stereo, 5.1, or 7.1.".into());
     }
     Ok(prefs)
 }
@@ -289,6 +336,10 @@ pub struct SessionStatus {
     pub codec: String,
     pub bitrate_mbps: u32,
     pub hotkey_shift: bool,
+    pub game_mouse: bool,
+    pub system_keys: String,
+    pub audio_on_host: bool,
+    pub audio_channels: String,
     pub displays: Vec<StreamWindowStatus>,
     pub scale_options: Vec<ScaleOption>,
 }
@@ -296,7 +347,10 @@ pub struct SessionStatus {
 struct StreamChild {
     child: Child,
     display_index: usize,
+    /// This window should play stream audio (exactly one per session).
     audio: bool,
+    /// Moonlight has been told `audio` (ECLIPSE_AUDIO at spawn, or `audio 1`).
+    audio_sent: bool,
     ui_port: Option<u16>,
 }
 
@@ -402,6 +456,27 @@ impl SessionInner {
             Ok(None) => true,
             _ => false,
         });
+        // The audio window closed: move audio to a remaining window.
+        if !windows.is_empty() && !windows.iter().any(|w| w.audio) {
+            windows[0].audio = true;
+            windows[0].audio_sent = false;
+        }
+        let promote: Vec<u16> = windows
+            .iter_mut()
+            .filter(|w| w.audio && !w.audio_sent)
+            .filter_map(|w| {
+                let port = w.ui_port?;
+                w.audio_sent = true;
+                Some(port)
+            })
+            .collect();
+        if !promote.is_empty() {
+            drop(windows);
+            for port in promote {
+                push_display_map(port, "audio 1");
+            }
+            windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        }
         if windows.is_empty() {
             if let Some(ip) = self
                 .connected_ip
@@ -468,6 +543,10 @@ impl SessionInner {
             codec: prefs.codec,
             bitrate_mbps: prefs.bitrate_mbps,
             hotkey_shift: prefs.hotkey_shift,
+            game_mouse: prefs.game_mouse,
+            system_keys: prefs.system_keys,
+            audio_on_host: prefs.audio_on_host,
+            audio_channels: prefs.audio_channels,
             displays,
             scale_options: options,
         }
@@ -476,10 +555,15 @@ impl SessionInner {
     fn set_prefs(&self, prefs: StreamPrefs) -> Result<(), String> {
         let prefs = validate_prefs(prefs)?;
         let old = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let video_changed = old.scale != prefs.scale
+        // Launch-arg prefs: open windows respawn so the change takes effect.
+        let stream_changed = old.scale != prefs.scale
             || old.fps != prefs.fps
             || old.codec != prefs.codec
-            || old.bitrate_mbps != prefs.bitrate_mbps;
+            || old.bitrate_mbps != prefs.bitrate_mbps
+            || old.game_mouse != prefs.game_mouse
+            || old.system_keys != prefs.system_keys
+            || old.audio_on_host != prefs.audio_on_host
+            || old.audio_channels != prefs.audio_channels;
         let hotkey_changed = old.hotkey_shift != prefs.hotkey_shift;
         *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = prefs.clone();
         save_prefs(&prefs);
@@ -488,7 +572,7 @@ impl SessionInner {
             self.broadcast_hotkey_shift(prefs.hotkey_shift);
             let _ = self.broadcast_display_map();
         }
-        if !video_changed {
+        if !stream_changed {
             return Ok(());
         }
         let ip = self
@@ -528,7 +612,8 @@ impl SessionInner {
         let open = self.open_display_indices();
         for index in 0..count {
             if !open.contains(&index) {
-                self.spawn_window(&ip, index, index == 0)?;
+                let audio = !self.has_audio_window();
+                self.spawn_window(&ip, index, audio)?;
             }
         }
         Ok(())
@@ -669,16 +754,9 @@ impl SessionInner {
     fn spawn_window(&self, ip: &str, display_index: usize, audio: bool) -> Result<(), String> {
         let (width, height) = self.stream_size_for(display_index);
         let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let (display_map, env) = self.moonlight_display_env(display_index);
-        let args = stream_args(
-            ip,
-            width,
-            height,
-            Some(display_index),
-            audio,
-            &prefs,
-            &display_map,
-        );
+        let (display_map, mut env) = self.moonlight_display_env(display_index);
+        env.push(("ECLIPSE_AUDIO", if audio { "1".into() } else { "0".into() }));
+        let args = stream_args(ip, width, height, Some(display_index), &prefs, &display_map);
         let child = MOONLIGHT
             .spawn_args_env(&args, &env)
             .map_err(|err| format!("Failed to start Moonlight stream: {err}"))?;
@@ -689,9 +767,18 @@ impl SessionInner {
                 child,
                 display_index,
                 audio,
+                audio_sent: true,
                 ui_port: None,
             });
         Ok(())
+    }
+
+    fn has_audio_window(&self) -> bool {
+        self.windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|w| w.audio)
     }
 
     fn moonlight_display_env(
@@ -742,8 +829,17 @@ impl SessionInner {
             return;
         }
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut promote = false;
         if let Some(slot) = windows.iter_mut().find(|w| w.child.id() == pid) {
             slot.ui_port = Some(port);
+            if slot.audio && !slot.audio_sent {
+                slot.audio_sent = true;
+                promote = true;
+            }
+        }
+        drop(windows);
+        if promote {
+            push_display_map(port, "audio 1");
         }
     }
 
@@ -991,6 +1087,26 @@ fn load_prefs() -> StreamPrefs {
     if let Some(shift) = value.get("hotkeyShift").and_then(|d| d.as_bool()) {
         prefs.hotkey_shift = shift;
     }
+    if let Some(game) = value.get("gameMouse").and_then(|d| d.as_bool()) {
+        prefs.game_mouse = game;
+    }
+    if let Some(keys) = value
+        .get("systemKeys")
+        .and_then(|d| d.as_str())
+        .filter(|k| SYSTEM_KEYS.contains(k))
+    {
+        prefs.system_keys = keys.to_string();
+    }
+    if let Some(host) = value.get("audioOnHost").and_then(|d| d.as_bool()) {
+        prefs.audio_on_host = host;
+    }
+    if let Some(channels) = value
+        .get("audioChannels")
+        .and_then(|d| d.as_str())
+        .filter(|c| AUDIO_CHANNELS.contains(c))
+    {
+        prefs.audio_channels = channels.to_string();
+    }
     prefs
 }
 
@@ -1006,6 +1122,10 @@ fn save_prefs(prefs: &StreamPrefs) {
         "codec": prefs.codec,
         "bitrateMbps": prefs.bitrate_mbps,
         "hotkeyShift": prefs.hotkey_shift,
+        "gameMouse": prefs.game_mouse,
+        "systemKeys": prefs.system_keys,
+        "audioOnHost": prefs.audio_on_host,
+        "audioChannels": prefs.audio_channels,
     });
     let _ = std::fs::write(path, body.to_string());
 }
@@ -1032,7 +1152,6 @@ mod tests {
                 1440,
                 960,
                 Some(0),
-                true,
                 &StreamPrefs::default(),
                 "0;Ctrl+Alt+1;DP-1|1;Ctrl+Alt+2;HDMI",
             ),
@@ -1052,6 +1171,15 @@ mod tests {
                 "--absolute-mouse",
                 "--display-mode",
                 "windowed",
+                "--capture-system-keys",
+                "fullscreen",
+                "--audio-config",
+                "stereo",
+                "--no-audio-on-host",
+                "--no-mute-on-focus-loss",
+                "--no-mouse-buttons-swap",
+                "--no-reverse-scroll-direction",
+                "--no-touchscreen-trackpad",
                 "--host-display",
                 "0",
                 "--eclipse-display-map",
@@ -1060,6 +1188,58 @@ mod tests {
                 "Desktop"
             ]
         );
+    }
+
+    #[test]
+    fn game_mouse_streams_relative_motion() {
+        let defaults = StreamPrefs::default();
+        let desktop = stream_args("100.64.0.1", 1920, 1080, None, &defaults, "");
+        assert!(desktop.iter().any(|a| a == "--absolute-mouse"));
+        assert!(!desktop.iter().any(|a| a == "--no-absolute-mouse"));
+
+        let prefs = StreamPrefs {
+            game_mouse: true,
+            ..StreamPrefs::default()
+        };
+        let game = stream_args("100.64.0.1", 1920, 1080, None, &prefs, "");
+        assert!(game.iter().any(|a| a == "--no-absolute-mouse"));
+        assert!(!game.iter().any(|a| a == "--absolute-mouse"));
+    }
+
+    #[test]
+    fn stream_prefs_pin_keys_and_audio() {
+        let prefs = StreamPrefs {
+            system_keys: "always".into(),
+            audio_on_host: true,
+            audio_channels: "5.1-surround".into(),
+            ..StreamPrefs::default()
+        };
+        let args = stream_args("100.64.0.1", 1920, 1080, None, &prefs, "");
+        let pair = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        assert_eq!(pair("--capture-system-keys").as_deref(), Some("always"));
+        assert_eq!(pair("--audio-config").as_deref(), Some("5.1-surround"));
+        assert!(args.iter().any(|a| a == "--audio-on-host"));
+        assert!(!args.iter().any(|a| a == "--mute-on-focus-loss"));
+    }
+
+    #[test]
+    fn invalid_keys_or_audio_prefs_are_rejected() {
+        let keys = StreamPrefs {
+            system_keys: "sometimes".into(),
+            ..StreamPrefs::default()
+        };
+        assert!(validate_prefs(keys).is_err());
+        let audio = StreamPrefs {
+            audio_channels: "mono".into(),
+            ..StreamPrefs::default()
+        };
+        assert!(validate_prefs(audio).is_err());
+        assert!(validate_prefs(StreamPrefs::default()).is_ok());
     }
 
     #[test]
@@ -1187,17 +1367,33 @@ no Qt platform plugin
             child: finished,
             display_index: 0,
             audio: true,
+            audio_sent: true,
             ui_port: None,
         });
         session.inner.windows.lock().unwrap().push(StreamChild {
             child: live,
             display_index: 1,
             audio: false,
+            audio_sent: true,
             ui_port: None,
         });
         session.inner.reap_windows();
         assert!(session.inner.connected_ip.lock().unwrap().is_some());
         assert_eq!(session.inner.windows.lock().unwrap().len(), 1);
+        {
+            // Audio moves to the surviving window; delivery waits for its UI port.
+            let windows = session.inner.windows.lock().unwrap();
+            assert!(windows[0].audio);
+            assert!(!windows[0].audio_sent);
+        }
+        let pid = session.inner.windows.lock().unwrap()[0].child.id();
+        // Nothing listens on this port; the push fails fast but marks delivery.
+        let unused = TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("port");
+        session.inner.register_ui_port(pid, unused);
+        assert!(session.inner.windows.lock().unwrap()[0].audio_sent);
         {
             let mut windows = session.inner.windows.lock().unwrap();
             kill_child(windows.pop().map(|w| w.child));

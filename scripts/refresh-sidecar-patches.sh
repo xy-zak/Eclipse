@@ -21,6 +21,8 @@ MOONLIGHT_BEHAVIOR=(
   app/settings/streamingpreferences.h
   app/streaming/eclipsepopup.cpp
   app/streaming/eclipsepopup.h
+  app/streaming/audio/audio.cpp
+  app/streaming/input/input.cpp
   app/streaming/input/keyboard.cpp
   app/streaming/session.cpp
   app/streaming/session.h
@@ -52,6 +54,7 @@ MOONLIGHT_UI=(
 SUNSHINE_EGL=(src/platform/linux/graphics.cpp)
 SUNSHINE_UDEV=(cmake/FindSystemd.cmake cmake/FindUdev.cmake)
 SUNSHINE_IDLE=(tools/sunshinesvc.cpp tools/CMakeLists.txt)
+SUNSHINE_AUDIO=(src/platform/linux/audio.cpp cmake/compile_definitions/linux.cmake)
 
 need_repo() {
   local repo="$1"
@@ -120,7 +123,7 @@ write_patch "${MOONLIGHT_SRC}" "${PATCH_DIR}/moonlight-02-ui.patch" \
   "${MOONLIGHT_UI[@]}"
 
 echo "==> Sunshine (non-overlapping files only)"
-intent_add "${SUNSHINE_SRC}" "${SUNSHINE_EGL[@]}" "${SUNSHINE_UDEV[@]}" "${SUNSHINE_IDLE[@]}"
+intent_add "${SUNSHINE_SRC}" "${SUNSHINE_EGL[@]}" "${SUNSHINE_UDEV[@]}" "${SUNSHINE_IDLE[@]}" "${SUNSHINE_AUDIO[@]}"
 write_patch "${SUNSHINE_SRC}" "${PATCH_DIR}/sunshine-egl-bad-match.patch" \
   "sunshine-egl-bad-match" \
   "Retry DMA-BUF EGL import without modifier on EGL_BAD_MATCH (00003009)." \
@@ -136,6 +139,11 @@ write_patch "${SUNSHINE_SRC}" "${PATCH_DIR}/sunshine-idle-awake.patch" \
   "Windows sunshinesvc: PowerRequestSystemRequired while Sunshine.exe runs; restart on resume. Lid-close still sleeps." \
   "vendor/PINS sunshine" \
   "${SUNSHINE_IDLE[@]}"
+write_patch "${SUNSHINE_SRC}" "${PATCH_DIR}/sunshine-session-audio.patch" \
+  "sunshine-session-audio" \
+  "Root host service: connect PulseAudio to the active seat0 user's socket so packaged Linux hosts stream audio." \
+  "vendor/PINS sunshine" \
+  "${SUNSHINE_AUDIO[@]}"
 
 echo
 echo "Not regenerated (overlapping hunks; edit by hand, keep headers):"

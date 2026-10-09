@@ -1,0 +1,102 @@
+Subject: sunshine-session-audio
+Why: Root host service: connect PulseAudio to the active seat0 user's socket so packaged Linux hosts stream audio.
+Depends-on: vendor/PINS sunshine
+
+diff --git a/cmake/compile_definitions/linux.cmake b/cmake/compile_definitions/linux.cmake
+index 485e419a..571cdca2 100644
+--- a/cmake/compile_definitions/linux.cmake
++++ b/cmake/compile_definitions/linux.cmake
+@@ -325,6 +325,7 @@ list(APPEND PLATFORM_TARGET_FILES
+ list(APPEND PLATFORM_LIBRARIES
+         dl
+         pulse
+-        pulse-simple)
++        pulse-simple
++        systemd)
+ 
+ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES glad)
+diff --git a/src/platform/linux/audio.cpp b/src/platform/linux/audio.cpp
+index bfd3ab77..34931cdc 100644
+--- a/src/platform/linux/audio.cpp
++++ b/src/platform/linux/audio.cpp
+@@ -4,14 +4,20 @@
+  */
+ // standard includes
+ #include <bitset>
++#include <cstdlib>
+ #include <sstream>
+ #include <thread>
+ 
++// platform includes
++#include <sys/stat.h>
++#include <unistd.h>
++
+ // lib includes
+ #include <boost/regex.hpp>
+ #include <pulse/error.h>
+ #include <pulse/pulseaudio.h>
+ #include <pulse/simple.h>
++#include <systemd/sd-login.h>
+ 
+ // local includes
+ #include "src/config.h"
+@@ -22,6 +28,33 @@
+ namespace platf {
+   using namespace std::literals;
+ 
++  /**
++   * @brief Eclipse: PulseAudio server for the packaged root host service.
++   *
++   * The system unit has no session environment, so libpulse cannot find the
++   * desktop user's server and reports "Access denied". Use the native socket of
++   * the active seat0 user instead. Re-resolved on every stream, so it follows
++   * user switches.
++   *
++   * @return `unix:` server string, or empty for the libpulse default (not root,
++   *         `PULSE_SERVER` already set, or nobody logged in on seat0).
++   */
++  std::string eclipse_pulse_server() {
++    if (geteuid() != 0 || std::getenv("PULSE_SERVER") != nullptr) {
++      return {};
++    }
++    uid_t uid = 0;
++    if (sd_seat_get_active("seat0", nullptr, &uid) < 0 || uid == 0) {
++      return {};
++    }
++    const auto socket = "/run/user/"s + std::to_string(uid) + "/pulse/native";
++    struct stat st {};
++    if (stat(socket.c_str(), &st) != 0 || !S_ISSOCK(st.st_mode)) {
++      return {};
++    }
++    return "unix:"s + socket;
++  }
++
+   /**
+    * @brief Position mapping.
+    */
+@@ -119,8 +152,9 @@ namespace platf {
+ 
+     int status;
+ 
++    const auto server = eclipse_pulse_server();
+     mic->mic.reset(
+-      pa_simple_new(nullptr, "sunshine", pa_stream_direction_t::PA_STREAM_RECORD, source_name.c_str(), "sunshine-record", &ss, &pa_map, &pa_attr, &status)
++      pa_simple_new(server.empty() ? nullptr : server.c_str(), "sunshine", pa_stream_direction_t::PA_STREAM_RECORD, source_name.c_str(), "sunshine-record", &ss, &pa_map, &pa_attr, &status)
+     );
+ 
+     if (!mic->mic) {
+@@ -338,7 +372,13 @@ namespace platf {
+ 
+         pa_context_set_state_callback(ctx.get(), ctx_state_cb, events_cb.get());
+ 
+-        auto status = pa_context_connect(ctx.get(), nullptr, PA_CONTEXT_NOFLAGS, nullptr);
++        const auto server = eclipse_pulse_server();
++        if (!server.empty()) {
++          BOOST_LOG(info) << "Eclipse: using desktop audio server "sv << server;
++        } else if (geteuid() == 0 && std::getenv("PULSE_SERVER") == nullptr) {
++          BOOST_LOG(warning) << "Eclipse: no desktop user is logged in on seat0; stream audio starts after login"sv;
++        }
++        auto status = pa_context_connect(ctx.get(), server.empty() ? nullptr : server.c_str(), PA_CONTEXT_NOFLAGS, nullptr);
+         if (status) {
+           BOOST_LOG(error) << "Couldn't connect to pulseaudio: "sv << pa_strerror(status);
+           return -1;

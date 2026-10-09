@@ -133,15 +133,16 @@ Once a session is established, Tauri gets out of the way. The raw data pipeline 
 4. **Client Decoding:** Moonlight receives the packet and uses the Client OS hardware decoder (DXVA2/D3D11VA on Windows, VDPAU/VA-API on Linux).
 5. **Client Render:** Moonlight paints the decoded frame directly to an OpenGL/Vulkan/DirectX context. Fullscreen is borderless desktop mode with integer-scale letterboxing (never stretched pixels).
 
-Host display inventory is `GET /api/displays` on Sunshine `:47990`. Each stream window can select a host output (`--host-display`); Sunshine runs one capture+encode pipeline per output. Audio plays on the primary window only.
+Host display inventory is `GET /api/displays` on Sunshine `:47990`. Each stream window can select a host output (`--host-display`); Sunshine runs one capture+encode pipeline per output. Audio plays on exactly one window: Eclipse starts the others with `ECLIPSE_AUDIO=0` (no audio device) and sends `audio 1` over the window's UI port to promote a survivor when the audio window closes.
 
-In-stream shortcuts use **Ctrl+Alt** by default (consumed in Moonlight, not sent to the host). The Client **Commands** dropdown can switch the chord to **Ctrl+Alt+Shift**. Shift is otherwise reserved for Sunshine’s F1–F12 display switch:
+In-stream shortcuts use **Ctrl+left Alt** by default (consumed in Moonlight, not sent to the host). AltGr / right Alt is never part of the chord, so AltGr characters reach the host. The Client **Commands** dropdown can switch the chord to **Ctrl+Alt+Shift**. Shift is otherwise reserved for Sunshine’s F1–F12 display switch:
 
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+Alt+Esc | Close every client window and disconnect (quit the host Desktop app) |
 | Ctrl+Alt+F | Toggle letterboxed fullscreen on this window |
 | Ctrl+Alt+K | Toggle Super / Windows key ownership (client vs host) |
+| Ctrl+Alt+M | Toggle this window between absolute (Desktop) and relative (Game) mouse |
 | Ctrl+Alt+- | List host displays and this window’s active display |
 | Ctrl+Alt+1–9 | Retarget this window to host display N |
 | Ctrl+Alt+0 | Open one client window per host display |

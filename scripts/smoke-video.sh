@@ -92,15 +92,41 @@ sunshine_log_path() {
   echo "${XDG_CONFIG_HOME:-${HOME}/.config}/sunshine/sunshine.log"
 }
 
-latest_slice() {
-  local file="$1"
-  [[ -f "${file}" ]] || return 0
+# Lines from the last "Sunshine version:" banner (the newest instance) to EOF.
+slice_latest_instance() {
   awk '
     BEGIN { start = 1 }
     /Sunshine version:/ { start = NR }
     { lines[NR] = $0 }
     END { for (i = start; i <= NR; i++) print lines[i] }
-  ' "${file}"
+  '
+}
+
+latest_slice() {
+  local file="$1"
+  [[ -f "${file}" ]] || return 0
+  slice_latest_instance <"${file}"
+}
+
+# Attached to the packaged host: it logs to the journal, not ~/.config/sunshine.
+using_service_log() {
+  [[ "${SPAWNED}" -eq 0 ]] && systemctl is-active --quiet eclipse-host.service 2>/dev/null
+}
+
+host_log_name() {
+  if using_service_log; then
+    echo "journalctl -u eclipse-host.service"
+  else
+    sunshine_log_path
+  fi
+}
+
+host_log_slice() {
+  if using_service_log; then
+    journalctl -u eclipse-host.service -b -o cat --no-pager 2>/dev/null | slice_latest_instance
+  else
+    latest_slice "$(sunshine_log_path)"
+  fi
 }
 
 host_video_issue() {
@@ -114,6 +140,16 @@ host_video_issue() {
     return 0
   fi
   return 1
+}
+
+host_audio_issue() {
+  grep -qE "Unable to initialize audio capture|Couldn't connect to pulseaudio|pa_simple_new\(\) failed" <<<"$1"
+}
+
+# Packaged hosts log to the journal (eclipse-host.service), not ~/.config/sunshine.
+service_log_since() {
+  systemctl is-active --quiet eclipse-host.service 2>/dev/null || return 0
+  journalctl -u eclipse-host.service --since "@$1" -o cat --no-pager 2>/dev/null || true
 }
 
 print_host_summary() {
@@ -161,11 +197,10 @@ ensure_host_up() {
 }
 
 wait_for_encoder() {
-  local slog slice issue i
-  slog="$(sunshine_log_path)"
+  local slice issue i
   for i in $(seq 1 "${ENCODER_TRIES}"); do
-    if [[ -f "${slog}" ]]; then
-      slice="$(latest_slice "${slog}")"
+    slice="$(host_log_slice)"
+    if [[ -n "${slice}" ]]; then
       if issue="$(host_video_issue "${slice}")"; then
         print_host_summary "${slice}"
         die "${issue}"
@@ -178,8 +213,8 @@ wait_for_encoder() {
     fi
     sleep 0.5
   done
-  print_host_summary "$(latest_slice "${slog}")"
-  die "No H.264 encoder line in ${slog} after 30s. See docs/Video.md."
+  print_host_summary "$(host_log_slice)"
+  die "No H.264 encoder line in $(host_log_name) after 30s. See docs/Video.md."
 }
 
 check_rtsp_ports() {
@@ -195,6 +230,8 @@ check_rtsp_ports() {
 
 check_listening_host_matches_log() {
   local pids n_pids ui_pid proc_epoch log_line ts log_epoch
+  # systemd owns the service process; its journal is always that instance.
+  using_service_log && return 0
   pids="$(pgrep -x sunshine 2>/dev/null || true)"
   n_pids="$(printf '%s\n' "${pids}" | grep -c '[0-9]' || true)"
   if [[ "${n_pids}" -gt 1 ]]; then
@@ -219,7 +256,7 @@ check_host() {
   ensure_host_up
   wait_for_encoder
   local slice
-  slice="$(latest_slice "$(sunshine_log_path)")"
+  slice="$(host_log_slice)"
   print_host_summary "${slice}"
   check_rtsp_ports
   check_listening_host_matches_log
@@ -314,7 +351,7 @@ fail_if_moon_log() {
 }
 
 run_client() {
-  local ip="$1" slog mark moon_log moon_pid t new=""
+  local ip="$1" slog mark moon_log moon_pid t new="" started
   require_display
   require_moonlight
   [[ -n "${ip}" ]] || die "client mode needs an IP"
@@ -323,6 +360,7 @@ run_client() {
   mark="$(wc -l < "${slog}" 2>/dev/null || echo 0)"
   moon_log="${TMPDIR:-/tmp}/eclipse-moonlight-smoke.log"
   : > "${moon_log}"
+  started="$(date +%s)"
   log "Streaming to ${ip} for ${STREAM_SECS}s (windowed ${RESOLUTION} H.264)"
   moonlight_cmd stream \
     --resolution "${RESOLUTION}" --video-codec H.264 --no-hdr --packet-size 1024 \
@@ -349,8 +387,15 @@ run_client() {
   fi
   case "${ip}" in
     127.0.0.1|localhost|::1)
+      new+=$'\n'"$(service_log_since "${started}")"
       grep -q "CLIENT CONNECTED" <<<"${new}" || \
         die "Loopback stream ran ${STREAM_SECS}s but Sunshine never logged CLIENT CONNECTED."
+      if host_audio_issue "${new}"; then
+        grep -E "Unable to initialize audio capture|Couldn't connect to pulseaudio|pa_simple_new|Eclipse: " <<<"${new}" \
+          | tail -n 10 | tee -a "${TRANSCRIPT}" || true
+        die "Host streamed without audio. Packaged Linux hosts need patches/sunshine-session-audio.patch and a desktop user logged in on seat0."
+      fi
+      log "OK host audio: capture initialized"
       ;;
   esac
   log "OK client: Moonlight ran ${STREAM_SECS}s without a no-video error"

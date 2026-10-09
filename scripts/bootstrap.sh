@@ -228,7 +228,7 @@ pkg_debian() {
     libavahi-client-dev libcap-dev libdrm-dev libevdev-dev libnotify-dev \
     libpipewire-0.3-dev libpulse-dev libva-dev libvdpau-dev \
     libx11-dev libxcb1-dev libxfixes-dev libxrandr-dev libxtst-dev \
-    libminiupnpc-dev libnuma-dev libopus-dev \
+    libminiupnpc-dev libnuma-dev libopus-dev libsystemd-dev \
     qt6-base-dev qt6-declarative-dev libqt6svg6-dev qt6-wayland \
     qml6-module-qtquick-controls qml6-module-qtquick-templates \
     qml6-module-qtquick-layouts qml6-module-qtqml-workerscript \
@@ -249,7 +249,7 @@ pkg_fedora() {
     avahi-devel libcap-devel libdrm-devel libevdev-devel libnotify-devel \
     pipewire-devel pulseaudio-libs-devel libva-devel libvdpau-devel \
     libX11-devel libxcb-devel libXfixes-devel libXrandr-devel libXtst-devel \
-    miniupnpc-devel numactl-devel opus-devel \
+    miniupnpc-devel numactl-devel opus-devel systemd-devel \
     qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel qt6-qtwayland \
     SDL2-devel SDL2_ttf-devel ffmpeg-devel libplacebo-devel vulkan-headers \
     libva-utils mesa-dri-drivers intel-media-driver dnf-plugins-core

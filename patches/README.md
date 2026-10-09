@@ -14,10 +14,11 @@ Glob order is apply order:
 2. `sunshine-displays.patch` — `GET /api/displays`, `displayIndex` capture
 3. `sunshine-egl-bad-match.patch` — EGL `00003009` DMA-BUF fallback
 4. `sunshine-idle-awake.patch` — Windows service idle-sleep inhibit + resume restart
-5. `sunshine-sessions.patch` — `GET /api/sessions`, terminate on apps/close
-6. `sunshine-udev-prefix.patch` — CMake udev/systemd install dirs
-7. `moonlight-01-behavior.patch` — stream contract (C++/headers)
-8. `moonlight-02-ui.patch` — connecting splash, Eclipse dialogs/toasts, moon icon, qrc
+5. `sunshine-session-audio.patch` — root host service connects PulseAudio to the active seat0 user (links `libsystemd`)
+6. `sunshine-sessions.patch` — `GET /api/sessions`, terminate on apps/close
+7. `sunshine-udev-prefix.patch` — CMake udev/systemd install dirs
+8. `moonlight-01-behavior.patch` — stream contract (C++/headers), `ECLIPSE_AUDIO` per-window audio, mouse-mode hints
+9. `moonlight-02-ui.patch` — connecting splash, Eclipse dialogs/toasts, moon icon, qrc
 
 Each file starts with `Subject:` / `Why:` / `Depends-on:`.
 
@@ -44,7 +45,7 @@ Keep the submodule at the pin. Edit files, then:
 .\scripts\refresh-sidecar-patches.ps1
 ```
 
-That regenerates Moonlight 01/02 and Sunshine egl / udev / idle-awake from
+That regenerates Moonlight 01/02 and Sunshine egl / udev / idle-awake / session-audio from
 `git diff` (plus `git add -N` for new files). **`sunshine-cgnat-pair.patch`,
 `sunshine-displays.patch`, and `sunshine-sessions.patch` share files**
 (`network.cpp` / `confighttp.cpp`, `rtsp.cpp`); refresh those by hand so stacked

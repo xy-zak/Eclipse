@@ -70,7 +70,14 @@ export type StreamPrefs = {
   codec: string;
   bitrateMbps: number;
   hotkeyShift: boolean;
+  gameMouse: boolean;
+  systemKeys: SystemKeys;
+  audioOnHost: boolean;
+  audioChannels: AudioChannels;
 };
+
+export type SystemKeys = "never" | "fullscreen" | "always";
+export type AudioChannels = "stereo" | "5.1-surround" | "7.1-surround";
 
 export type SessionStatus = {
   connected: boolean;
@@ -82,6 +89,10 @@ export type SessionStatus = {
   codec: string;
   bitrateMbps: number;
   hotkeyShift: boolean;
+  gameMouse: boolean;
+  systemKeys: SystemKeys;
+  audioOnHost: boolean;
+  audioChannels: AudioChannels;
   displays: StreamWindowStatus[];
   scaleOptions: ScaleOption[];
 };

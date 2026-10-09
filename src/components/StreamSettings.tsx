@@ -130,6 +130,61 @@ export function StreamSettings({ prefs, disabled, onChange }: Props) {
                 ]}
                 onChange={(bitrateMbps) => set({ bitrateMbps })}
               />
+              <div>
+                <Switch
+                  label="Mouse"
+                  value={prefs.gameMouse ? "game" : "desktop"}
+                  disabled={disabled}
+                  options={[
+                    { value: "desktop", label: "Desktop" },
+                    { value: "game", label: "Game" },
+                  ]}
+                  onChange={(mode) => set({ gameMouse: mode === "game" })}
+                />
+                <p className="mt-2 text-moonlight/70">
+                  Desktop follows your cursor and stops at the window edge.
+                  Game sends raw movement so aiming never stops; click the
+                  window to capture the mouse.
+                </p>
+              </div>
+              <div>
+                <Switch
+                  label="System keys → host"
+                  value={prefs.systemKeys}
+                  disabled={disabled}
+                  options={[
+                    { value: "never", label: "Off" },
+                    { value: "fullscreen", label: "Fullscreen" },
+                    { value: "always", label: "Always" },
+                  ]}
+                  onChange={(systemKeys) => set({ systemKeys })}
+                />
+                <p className="mt-2 text-moonlight/70">
+                  Alt+Tab, Super / Windows, and Alt+F4 go to the host instead
+                  of this PC. Ctrl+Alt+K flips it for one window.
+                </p>
+              </div>
+              <Switch
+                label="Play audio on"
+                value={prefs.audioOnHost ? "host" : "client"}
+                disabled={disabled}
+                options={[
+                  { value: "client", label: "This PC" },
+                  { value: "host", label: "Host" },
+                ]}
+                onChange={(where) => set({ audioOnHost: where === "host" })}
+              />
+              <Switch
+                label="Audio channels"
+                value={prefs.audioChannels}
+                disabled={disabled || prefs.audioOnHost}
+                options={[
+                  { value: "stereo", label: "Stereo" },
+                  { value: "5.1-surround", label: "5.1" },
+                  { value: "7.1-surround", label: "7.1" },
+                ]}
+                onChange={(audioChannels) => set({ audioChannels })}
+              />
             </div>
           </PopoverPanel>
         </>

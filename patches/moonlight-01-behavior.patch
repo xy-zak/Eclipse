@@ -383,12 +383,45 @@ index ad611f6a..8a035632 100644
  
  signals:
      void displayModeChanged();
+diff --git a/app/streaming/audio/audio.cpp b/app/streaming/audio/audio.cpp
+index 4668eec9..e73afdb4 100644
+--- a/app/streaming/audio/audio.cpp
++++ b/app/streaming/audio/audio.cpp
+@@ -1,4 +1,5 @@
+ #include "../session.h"
++#include "../eclipsepopup.h"
+ #include "renderers/renderer.h"
+ 
+ #ifdef HAVE_SLAUDIO
+@@ -134,7 +135,12 @@ int Session::arInit(int /* audioConfiguration */,
+                     void* /* arContext */, int /* arFlags */)
+ {
+     SDL_memcpy(&s_ActiveSession->m_OriginalAudioConfig, opusConfig, sizeof(*opusConfig));
+-    s_ActiveSession->initializeAudioRenderer();
++    // Eclipse: muted display windows open no audio device. If Eclipse later
++    // enables audio here, the null-renderer retry in arDecodeAndPlaySample
++    // creates the renderer from m_OriginalAudioConfig.
++    if (eclipseAudioEnabled()) {
++        s_ActiveSession->initializeAudioRenderer();
++    }
+     return 0;
+ }
+ 
+@@ -183,7 +189,7 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
+     s_ActiveSession->m_AudioSampleCount++;
+ 
+     // If audio is muted, don't decode or play the audio
+-    if (s_ActiveSession->m_AudioMuted) {
++    if (s_ActiveSession->m_AudioMuted || !eclipseAudioEnabled()) {
+         return;
+     }
+ 
 diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
 new file mode 100644
-index 00000000..a42631c4
+index 00000000..f388af53
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.cpp
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,774 @@
 +#include "eclipsepopup.h"
 +#include "streaming/session.h"
 +
@@ -432,6 +465,14 @@ index 00000000..a42631c4
 +void applyHotkeyShift(bool shift)
 +{
 +    g_hotkeyShift.store(shift ? 1 : 0);
++}
++
++// -1 until first read; then 0 (muted) or 1. Unset ECLIPSE_AUDIO keeps audio on.
++std::atomic<int> g_audioEnabled{-1};
++
++bool audioFromEnv()
++{
++    return qgetenv("ECLIPSE_AUDIO") != "0";
 +}
 +
 +bool hotkeyNeedsShift()
@@ -687,10 +728,12 @@ index 00000000..a42631c4
 +{
 +    const QString trimmed = line.trimmed();
 +    return trimmed == QLatin1String("HOST DISPLAYS") ||
-+           trimmed == QLatin1String("THIS WINDOW");
++           trimmed == QLatin1String("THIS WINDOW") ||
++           trimmed == QLatin1String("GAME MOUSE") ||
++           trimmed == QLatin1String("DESKTOP MOUSE");
 +}
 +
-+SDL_Surface* renderEclipseDisplayCard(const QString& text, SDL_Rect* okOut)
++SDL_Surface* renderEclipseDisplayCard(const QString& text, SDL_Rect* okOut, bool withOk = true)
 +{
 +    const int fontPx = 14;
 +    const int padX = 20;
@@ -733,7 +776,7 @@ index 00000000..a42631c4
 +    }
 +
 +    const int panelW = qBound(minPanelW, textW + padX * 2, maxPanelW);
-+    const int panelH = padTop + textH + btnGap + btnH + padBot;
++    const int panelH = padTop + textH + (withOk ? btnGap + btnH : 0) + padBot;
 +    SDL_Surface* card = SDL_CreateRGBSurfaceWithFormat(0, panelW, panelH, 32, SDL_PIXELFORMAT_ARGB8888);
 +    if (card == nullptr) {
 +        for (SDL_Surface* glyph : lines) {
@@ -759,9 +802,13 @@ index 00000000..a42631c4
 +        SDL_FreeSurface(glyph);
 +    }
 +
-+    const SDL_Rect okRect{panelW - padX - btnW, panelH - padBot - btnH, btnW, btnH};
-+    fillRect(card, okRect, kLavender);
-+    SDL_Surface* okGlyph = toArgb8888(TTF_RenderUTF8_Blended(font, "OK", kNavy));
++    const SDL_Rect okRect = withOk
++        ? SDL_Rect{panelW - padX - btnW, panelH - padBot - btnH, btnW, btnH}
++        : SDL_Rect{};
++    if (withOk) {
++        fillRect(card, okRect, kLavender);
++    }
++    SDL_Surface* okGlyph = withOk ? toArgb8888(TTF_RenderUTF8_Blended(font, "OK", kNavy)) : nullptr;
 +    if (okGlyph != nullptr) {
 +        SDL_Rect okDst{
 +            okRect.x + (okRect.w - okGlyph->w) / 2,
@@ -817,6 +864,10 @@ index 00000000..a42631c4
 +                applyHotkeyShift(trimmed.contains('1'));
 +                continue;
 +            }
++            if (trimmed.startsWith("audio ")) {
++                g_audioEnabled.store(trimmed.endsWith('1') ? 1 : 0);
++                continue;
++            }
 +            SDL_Event event = {};
 +            event.type = SDL_USEREVENT;
 +            event.user.code = SDL_CODE_ECLIPSE_DISPLAY_MAP;
@@ -835,6 +886,9 @@ index 00000000..a42631c4
 +int g_overlayH = 0;
 +SDL_Rect g_okRect = {};
 +SDL_Window* g_overlayWindow = nullptr;
++// Non-interactive hint card. Shares the OverlayStatusUpdate slot with the
++// display map, which wins: a hint never replaces or clears a visible map.
++quint32 g_hintUntil = 0;
 +
 +void hideDisplayMapOverlay()
 +{
@@ -848,6 +902,18 @@ index 00000000..a42631c4
 +        return;
 +    }
 +    session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, nullptr);
++}
++
++void hideHintOverlay()
++{
++    if (g_hintUntil == 0) {
++        return;
++    }
++    g_hintUntil = 0;
++    Session* session = Session::get();
++    if (session && g_overlayUntil == 0) {
++        session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, nullptr);
++    }
 +}
 +
 +bool overlayPointInRect(int x, int y, const SDL_Rect& rect)
@@ -891,7 +957,9 @@ index 00000000..a42631c4
 +        return false;
 +    }
 +    const Uint16 mod = event->keysym.mod;
-+    if (!(mod & KMOD_CTRL) || !(mod & KMOD_ALT) || (mod & KMOD_GUI)) {
++    // Left Alt only: Windows reports AltGr as LCtrl+RAlt, and AltGr+Q/0-9/-
++    // types @ { [ ] } \ on DE/FR layouts. Those must reach the host.
++    if (!(mod & KMOD_CTRL) || !(mod & KMOD_LALT) || (mod & (KMOD_GUI | KMOD_MODE))) {
 +        return false;
 +    }
 +    const bool shift = (mod & KMOD_SHIFT) != 0;
@@ -901,6 +969,56 @@ index 00000000..a42631c4
 +void eclipseSetHotkeyShift(bool shift)
 +{
 +    applyHotkeyShift(shift);
++}
++
++bool eclipseAudioEnabled()
++{
++    int value = g_audioEnabled.load();
++    if (value < 0) {
++        int expected = -1;
++        const int next = audioFromEnv() ? 1 : 0;
++        if (g_audioEnabled.compare_exchange_strong(expected, next)) {
++            return next != 0;
++        }
++        return expected != 0;
++    }
++    return value != 0;
++}
++
++void eclipseShowHint(const QString& text, int ms)
++{
++    Session* session = Session::get();
++    if (!session || g_overlayUntil != 0 || qEnvironmentVariableIsEmpty("ECLIPSE_CONTROL")) {
++        return;
++    }
++    SDL_Surface* card = renderEclipseDisplayCard(text, nullptr, false);
++    if (card == nullptr) {
++        return;
++    }
++    session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, card);
++    g_hintUntil = SDL_GetTicks() + static_cast<quint32>(ms);
++    if (g_hintUntil == 0) {
++        g_hintUntil = 1;
++    }
++}
++
++void eclipseHideHint()
++{
++    hideHintOverlay();
++}
++
++void eclipseShowMouseModeHint(bool absolute, bool captured)
++{
++    const QString chord = QString::fromLatin1(hotkeyNeedsShift() ? "Ctrl+Alt+Shift+M" : "Ctrl+Alt+M");
++    if (absolute) {
++        eclipseShowHint(QStringLiteral("DESKTOP MOUSE\n  Pointer follows your cursor.\n  %1 for game mouse.").arg(chord), 2500);
++    }
++    else if (captured) {
++        eclipseShowHint(QStringLiteral("GAME MOUSE\n  Pointer captured for aiming.\n  %1 for desktop mouse.").arg(chord), 2500);
++    }
++    else {
++        eclipseShowHint(QStringLiteral("GAME MOUSE\n  Click the stream to capture the pointer.\n  %1 for desktop mouse.").arg(chord), 6000);
++    }
 +}
 +
 +QString eclipseDisplayName()
@@ -918,6 +1036,7 @@ index 00000000..a42631c4
 +
 +void eclipseStopUiListener()
 +{
++    g_hintUntil = 0;
 +    hideDisplayMapOverlay();
 +    if (!g_listener) {
 +        return;
@@ -932,6 +1051,9 @@ index 00000000..a42631c4
 +{
 +    if (g_overlayUntil != 0 && SDL_TICKS_PASSED(SDL_GetTicks(), g_overlayUntil)) {
 +        hideDisplayMapOverlay();
++    }
++    if (g_hintUntil != 0 && SDL_TICKS_PASSED(SDL_GetTicks(), g_hintUntil)) {
++        hideHintOverlay();
 +    }
 +}
 +
@@ -986,7 +1108,8 @@ index 00000000..a42631c4
 +    if (!ctrlAlt) {
 +        return false;
 +    }
-+    if (event->keysym.sym == SDLK_0) {
++    // Scancodes too, so AZERTY top-row digits (shifted symbols) still match.
++    if (event->keysym.sym == SDLK_0 || event->keysym.scancode == SDL_SCANCODE_0) {
 +        eclipseControl("open-all", 2000);
 +        return true;
 +    }
@@ -996,10 +1119,16 @@ index 00000000..a42631c4
 +        eclipseRequestShowDisplays();
 +        return true;
 +    }
++    int digit = 0;
 +    if (event->keysym.sym >= SDLK_1 && event->keysym.sym <= SDLK_9) {
++        digit = static_cast<int>(event->keysym.sym - SDLK_0);
++    }
++    else if (event->keysym.scancode >= SDL_SCANCODE_1 && event->keysym.scancode <= SDL_SCANCODE_9) {
++        digit = static_cast<int>(event->keysym.scancode - SDL_SCANCODE_1) + 1;
++    }
++    if (digit > 0) {
 +        char buf[48];
-+        snprintf(buf, sizeof(buf), "switch-display %d %u",
-+                 static_cast<int>(event->keysym.sym - SDLK_0), eclipsePid());
++        snprintf(buf, sizeof(buf), "switch-display %d %u", digit, eclipsePid());
 +        eclipseControl(buf, 2000);
 +        return true;
 +    }
@@ -1033,6 +1162,7 @@ index 00000000..a42631c4
 +        return;
 +    }
 +    g_lastPopupTicks = now;
++    g_hintUntil = 0;
 +
 +    Session* session = Session::get();
 +    if (!session) {
@@ -1068,10 +1198,10 @@ index 00000000..a42631c4
 +}
 diff --git a/app/streaming/eclipsepopup.h b/app/streaming/eclipsepopup.h
 new file mode 100644
-index 00000000..9cfe674e
+index 00000000..c88e2b30
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,133 @@
 +#pragma once
 +
 +#include "SDL_compat.h"
@@ -1103,8 +1233,8 @@ index 00000000..9cfe674e
 +/**
 + * @brief Whether this key matches the current Eclipse shortcut chord.
 + *
-+ * Ctrl+Alt, or Ctrl+Alt+Shift when `ECLIPSE_HOTKEY_SHIFT` is set. Super is
-+ * never part of the chord.
++ * Ctrl+left Alt, or Ctrl+left Alt+Shift when `ECLIPSE_HOTKEY_SHIFT` is set.
++ * Super and AltGr (right Alt / Mode) are never part of the chord.
 + */
 +bool eclipseIsHotkeyChord(const SDL_KeyboardEvent* event);
 +
@@ -1112,6 +1242,33 @@ index 00000000..9cfe674e
 + * @brief Apply a live shortcut-chord change from Eclipse (`hotkey-shift 0|1`).
 + */
 +void eclipseSetHotkeyShift(bool shift);
++
++/**
++ * @brief Whether this window plays stream audio.
++ *
++ * `ECLIPSE_AUDIO=0` starts muted (extra display windows); Eclipse can flip it
++ * live with `audio 0|1` when the audio window closes. Unset means on.
++ */
++bool eclipseAudioEnabled();
++
++/**
++ * @brief Show a non-interactive Eclipse hint card for @p ms milliseconds.
++ *
++ * Never replaces a visible display map and never consumes input.
++ */
++void eclipseShowHint(const QString& text, int ms);
++
++/**
++ * @brief Hide the hint card, if one is shown.
++ */
++void eclipseHideHint();
++
++/**
++ * @brief Hint for the current mouse mode (desktop = absolute, game = relative).
++ *
++ * @param captured Whether relative capture is already active.
++ */
++void eclipseShowMouseModeHint(bool absolute, bool captured);
 +
 +/**
 + * @brief Host display name for this window (`ECLIPSE_DISPLAY_NAME`).
@@ -1126,7 +1283,7 @@ index 00000000..9cfe674e
 +/**
 + * @brief Consume Ctrl+Alt(+Shift)+0 / - / 1–9 (open-all, overlay, switch-display).
 + *
-+ * Esc, F, K, and Q stay in the SDL input handler so they can use
++ * Esc, F, K, M, and Q stay in the SDL input handler so they can use
 + * `performSpecialKeyCombo`.
 + *
 + * @param event SDL keyboard event.
@@ -1178,8 +1335,36 @@ index 00000000..9cfe674e
 +                                const QString& hostList,
 +                                int activeIndex,
 +                                const QString& activeName);
+diff --git a/app/streaming/input/input.cpp b/app/streaming/input/input.cpp
+index cec9da49..9a4f1683 100644
+--- a/app/streaming/input/input.cpp
++++ b/app/streaming/input/input.cpp
+@@ -1,6 +1,7 @@
+ #include <Limelight.h>
+ #include "SDL_compat.h"
+ #include "streaming/session.h"
++#include "streaming/eclipsepopup.h"
+ #include "settings/mappingmanager.h"
+ #include "path.h"
+ #include "utils.h"
+@@ -317,6 +318,7 @@ void SdlInputHandler::notifyFocusLost()
+     // (desktop and exclusive), so we must check for that before releasing mouse capture.
+     if (!(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) && !m_AbsoluteMouseMode) {
+         setCaptureActive(false);
++        eclipseShowMouseModeHint(false, false);
+     }
+ 
+     // Raise all keys that are currently pressed. If we don't do this, certain keys
+@@ -392,6 +394,7 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
+ void SdlInputHandler::setCaptureActive(bool active)
+ {
+     if (active) {
++        eclipseHideHint();
+         // If we're in relative mode, try to activate SDL's relative mouse mode
+         if (m_AbsoluteMouseMode || SDL_SetRelativeMouseMode(SDL_TRUE) < 0) {
+             // Relative mouse mode didn't work or was disabled, so we'll just hide the cursor
 diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
-index b195f73b..4f636489 100644
+index b195f73b..51328a62 100644
 --- a/app/streaming/input/keyboard.cpp
 +++ b/app/streaming/input/keyboard.cpp
 @@ -1,4 +1,5 @@
@@ -1188,7 +1373,15 @@ index b195f73b..4f636489 100644
  
  #include <Limelight.h>
  #include "SDL_compat.h"
-@@ -185,6 +186,36 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+@@ -70,6 +71,7 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
+ 
+         // Recapture input
+         setCaptureActive(true);
++        eclipseShowMouseModeHint(m_AbsoluteMouseMode, isCaptureActive());
+         break;
+ 
+     case KeyComboToggleCursorHide:
+@@ -185,6 +187,42 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
          return;
      }
  
@@ -1201,7 +1394,7 @@ index b195f73b..4f636489 100644
 +
 +    // Eclipse: Ctrl+Alt shortcuts (Shift is optional via ECLIPSE_HOTKEY_SHIFT).
 +    // Consumed locally so they never reach the host. Display 0/-/1–9 are in
-+    // eclipseHandleDisplayHotkey; Esc/F/K/Q need performSpecialKeyCombo.
++    // eclipseHandleDisplayHotkey; Esc/F/K/M/Q need performSpecialKeyCombo.
 +    if (event->state == SDL_PRESSED && eclipseIsHotkeyChord(event)) {
 +        if (event->keysym.sym == SDLK_ESCAPE) {
 +            eclipseControl("disconnect-all");
@@ -1216,6 +1409,12 @@ index b195f73b..4f636489 100644
 +            performSpecialKeyCombo(KeyComboToggleKeyboardGrab);
 +            return;
 +        }
++        if (event->keysym.sym == SDLK_m) {
++            // Desktop (absolute) <-> Game (relative). Relative sends raw deltas,
++            // so in-game aim keeps turning when the client cursor would hit an edge.
++            performSpecialKeyCombo(KeyComboToggleMouseMode);
++            return;
++        }
 +        if (event->keysym.sym == SDLK_q) {
 +            performSpecialKeyCombo(KeyComboQuit);
 +            return;
@@ -1226,7 +1425,7 @@ index b195f73b..4f636489 100644
      if ((event->state == SDL_PRESSED) &&
              (event->keysym.mod & KMOD_CTRL) &&
 diff --git a/app/streaming/session.cpp b/app/streaming/session.cpp
-index 40c1e59c..78b8088c 100644
+index 40c1e59c..c0312d74 100644
 --- a/app/streaming/session.cpp
 +++ b/app/streaming/session.cpp
 @@ -1,6 +1,7 @@
@@ -1386,16 +1585,21 @@ index 40c1e59c..78b8088c 100644
      QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
      svgImage.fill(0);
  
-@@ -1960,6 +1982,8 @@ void Session::exec()
+@@ -1960,6 +1982,13 @@ void Session::exec()
      // Switch to async logging mode when we enter the SDL loop
      StreamUtils::enterAsyncLoggingMode();
  
 +    eclipseStartUiListener();
 +
++    // Windowed game mouse starts uncaptured (see above); say how to capture.
++    if (!m_IsFullScreen && !m_Preferences->absoluteMouseMode) {
++        eclipseShowMouseModeHint(false, false);
++    }
++
      // Hijack this thread to be the SDL main thread. We have to do this
      // because we want to suspend all Qt processing until the stream is over.
      SDL_Event event;
-@@ -1976,8 +2000,10 @@ void Session::exec()
+@@ -1976,8 +2005,10 @@ void Session::exec()
          // and other problems.
          if (!SDL_WaitEventTimeout(&event, 1000)) {
              presence.runCallbacks();
@@ -1406,7 +1610,7 @@ index 40c1e59c..78b8088c 100644
  #else
          // We explicitly use SDL_PollEvent() and SDL_Delay() because
          // SDL_WaitEvent() has an internal SDL_Delay(10) inside which
-@@ -1992,6 +2018,7 @@ void Session::exec()
+@@ -1992,6 +2023,7 @@ void Session::exec()
              SDL_Delay(10);
  #endif
              presence.runCallbacks();
@@ -1414,7 +1618,7 @@ index 40c1e59c..78b8088c 100644
              continue;
          }
  #endif
-@@ -2036,6 +2063,17 @@ void Session::exec()
+@@ -2036,6 +2068,17 @@ void Session::exec()
                  m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                      (DualSenseOutputReport *)event.user.data2);
                  break;
@@ -1432,7 +1636,7 @@ index 40c1e59c..78b8088c 100644
              default:
                  SDL_assert(false);
              }
-@@ -2253,12 +2291,21 @@ void Session::exec()
+@@ -2253,12 +2296,21 @@ void Session::exec()
          case SDL_MOUSEBUTTONDOWN:
          case SDL_MOUSEBUTTONUP:
              presence.runCallbacks();
@@ -1454,7 +1658,7 @@ index 40c1e59c..78b8088c 100644
              m_InputHandler->handleMouseWheelEvent(&event.wheel);
              break;
          case SDL_CONTROLLERAXISMOTION:
-@@ -2308,6 +2355,8 @@ void Session::exec()
+@@ -2308,6 +2360,8 @@ void Session::exec()
      }
  
  DispatchDeferredCleanup:

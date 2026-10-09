@@ -12,6 +12,7 @@ const SHORTCUTS: { key: string; action: string }[] = [
   { key: "Esc", action: "Disconnect all windows" },
   { key: "F", action: "Fullscreen this window" },
   { key: "K", action: "Super / Windows key: client or host" },
+  { key: "M", action: "Mouse: Desktop or Game (this window)" },
   { key: "-", action: "List host displays" },
   { key: "1–9", action: "This window → host display N" },
   { key: "0", action: "One window per host display" },
@@ -85,7 +86,8 @@ export function CommandsPopover({ prefs, onChange }: Props) {
             <p className="mt-3 text-moonlight/70">
               While a Moonlight window is focused. Combos are not sent to the
               host. Ctrl+Alt leaves Ctrl+Alt+Shift+F1–F12 free for Sunshine’s
-              host display switch.
+              host display switch. Use the left Alt key: AltGr / right Alt
+              always reaches the host, so layouts can type @ {"{ [ ] }"}.
             </p>
             <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-8 gap-y-2">
               {SHORTCUTS.map((row) => (
