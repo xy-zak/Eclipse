@@ -75,6 +75,8 @@ export type StreamPrefs = {
   audioOnHost: boolean;
   audioChannels: AudioChannels;
   yuv444: boolean;
+  streamUi: boolean;
+  uiPos: [number, number];
 };
 
 export type HostLockStatus = {
@@ -101,6 +103,8 @@ export type SessionStatus = {
   audioOnHost: boolean;
   audioChannels: AudioChannels;
   yuv444: boolean;
+  streamUi: boolean;
+  uiPos: [number, number];
   displays: StreamWindowStatus[];
   scaleOptions: ScaleOption[];
 };

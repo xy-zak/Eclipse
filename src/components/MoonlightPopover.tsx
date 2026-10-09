@@ -1,14 +1,24 @@
+import type { StreamPrefs } from "../types";
 import { InfoMenu, Section } from "./InfoPopover";
 import { StatusMark } from "./StatusMark";
 
 type Props = {
   moonlightPresent: boolean;
   moonlightActive: boolean;
+  prefs: StreamPrefs;
+  onChange: (prefs: StreamPrefs) => void;
 };
+
+const STREAM_UI_OPTIONS = [
+  { value: false, label: "Keyboard only" },
+  { value: true, label: "Keyboard + mouse" },
+] as const;
 
 export function MoonlightPopover({
   moonlightPresent,
   moonlightActive,
+  prefs,
+  onChange,
 }: Props) {
   return (
     <InfoMenu accent="moonlight" icon="moon-solid" label="Moonlight">
@@ -39,6 +49,34 @@ export function MoonlightPopover({
           the viewer binary is present.
         </p>
       ) : null}
+      <Section title="In-stream controls">
+        Keyboard + mouse adds a small Eclipse logo to every stream window.
+        Click it for a menu of the shortcut actions (fullscreen, mouse mode,
+        displays, stats, disconnect); drag it anywhere so it stays out of the
+        way. It hides while Game mouse has the pointer captured. Changes apply
+        to open windows immediately.
+      </Section>
+      <div className="flex">
+        {STREAM_UI_OPTIONS.map((option, i) => {
+          const selected = option.value === prefs.streamUi;
+          return (
+            <button
+              key={option.label}
+              type="button"
+              onClick={() => onChange({ ...prefs, streamUi: option.value })}
+              className={`min-w-0 flex-1 whitespace-nowrap border border-moonlight px-3 py-1 text-sm font-medium ${
+                i > 0 ? "-ml-px" : ""
+              } ${
+                selected
+                  ? "bg-moonlight text-eclipse"
+                  : "bg-eclipse text-moonlight hover:bg-moonlight/20"
+              }`}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
       <Section title="How viewing works">
         Moonlight starts only when you Connect. It decodes with this PC’s GPU
         and paints each stream in its own window. Stream quality (codec, scale,

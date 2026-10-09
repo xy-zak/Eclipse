@@ -15,6 +15,7 @@ const SHORTCUTS: { key: string; action: string }[] = [
   { key: "M", action: "Mouse: Desktop or Game (this window)" },
   { key: "S", action: "Connection stats overlay" },
   { key: "V", action: "Type clipboard text on the host" },
+  { key: "?", action: "Show these shortcuts in the stream (or H)" },
   { key: "-", action: "List host displays" },
   { key: "1–9", action: "This window → host display N" },
   { key: "0", action: "One window per host display" },
@@ -89,7 +90,9 @@ export function CommandsPopover({ prefs, onChange }: Props) {
               While a Moonlight window is focused. Combos are not sent to the
               host. Ctrl+Alt leaves Ctrl+Alt+Shift+F1–F12 free for Sunshine’s
               host display switch. Use the left Alt key: AltGr / right Alt
-              always reaches the host, so layouts can type @ {"{ [ ] }"}.
+              always reaches the host, so layouts can type @ {"{ [ ] }"}. With
+              Keyboard + mouse controls (Moonlight menu), the same actions are
+              in the Eclipse logo menu inside each stream.
             </p>
             <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-8 gap-y-2">
               {SHORTCUTS.map((row) => (

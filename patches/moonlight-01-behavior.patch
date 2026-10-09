@@ -418,11 +418,12 @@ index 4668eec9..e73afdb4 100644
  
 diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
 new file mode 100644
-index 00000000..02304401
+index 00000000..311469ba
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.cpp
-@@ -0,0 +1,814 @@
+@@ -0,0 +1,1240 @@
 +#include "eclipsepopup.h"
++#include "streaming/eclipsestreamui.h"
 +#include "streaming/session.h"
 +
 +#include "SDL_compat.h"
@@ -430,6 +431,7 @@ index 00000000..02304401
 +#include <QFile>
 +#include <QHostAddress>
 +#include <QList>
++#include <QRegularExpression>
 +#include <QTcpServer>
 +#include <QTcpSocket>
 +#include <QThread>
@@ -687,6 +689,9 @@ index 00000000..02304401
 +const SDL_Color kGold{0xF7, 0xC7, 0x08, 0xFF};
 +const SDL_Color kLavender{0xD9, 0xD9, 0xFC, 0xFF};
 +const SDL_Color kFail{0xF0, 0x52, 0x52, 0xFF};
++// The app's text-moonlight/70 and a faint moonlight rule, pre-blended on navy.
++const SDL_Color kMuted{0x9C, 0x9C, 0xBD, 0xFF};
++const SDL_Color kRule{0x33, 0x33, 0x4F, 0xFF};
 +
 +SDL_Surface* toArgb8888(SDL_Surface* src)
 +{
@@ -843,6 +848,323 @@ index 00000000..02304401
 +    return renderEclipseCard(text, okOut, withOk, CardStyle{});
 +}
 +
++// --- Structured cards (title, sections, label/value rows), like the app's popovers ---
++
++struct CardRow {
++    enum Kind { Title, Section, Pair, Note, Rule };
++    Kind kind;
++    QString left;
++    QString right;
++    SDL_Color leftColor = kMuted;
++    SDL_Color rightColor = kLavender;
++};
++
++CardRow titleRow(const QString& text)
++{
++    return CardRow{CardRow::Title, text, {}};
++}
++
++CardRow sectionRow(const QString& text)
++{
++    return CardRow{CardRow::Section, text.toUpper(), {}};
++}
++
++CardRow pairRow(const QString& label, const QString& value)
++{
++    return CardRow{CardRow::Pair, label, value};
++}
++
++CardRow noteRow(const QString& text)
++{
++    return CardRow{CardRow::Note, text, {}};
++}
++
++CardRow ruleRow()
++{
++    return CardRow{CardRow::Rule, {}, {}};
++}
++
++SDL_Surface* renderGlyph(TTF_Font* font, const QString& text, SDL_Color color)
++{
++    if (font == nullptr || text.isEmpty()) {
++        return nullptr;
++    }
++    const QByteArray utf8 = text.toUtf8();
++    return toArgb8888(TTF_RenderUTF8_Blended(font, utf8.constData(), color));
++}
++
++int rowGapBefore(CardRow::Kind kind, int prev)
++{
++    if (prev < 0) {
++        return 0;
++    }
++    if (kind == CardRow::Rule || prev == CardRow::Rule) {
++        return 10;
++    }
++    switch (kind) {
++    case CardRow::Section:
++        return prev == CardRow::Title ? 12 : 16;
++    case CardRow::Pair:
++        return prev == CardRow::Pair ? 5 : (prev == CardRow::Section ? 6 : 10);
++    default:
++        return 8;
++    }
++}
++
++SDL_Surface* renderEclipseRowsCard(const QList<CardRow>& rows, SDL_Color frame)
++{
++    const int padX = 20;
++    const int padTop = 16;
++    const int padBot = 16;
++    const int colGap = 32;
++    const int minPanelW = 300;
++    const int maxPanelW = 760;
++
++    TTF_Font* body = openJetBrainsMono(14);
++    TTF_Font* small = openJetBrainsMono(12);
++    if (body == nullptr || small == nullptr) {
++        if (body != nullptr) {
++            TTF_CloseFont(body);
++        }
++        if (small != nullptr) {
++            TTF_CloseFont(small);
++        }
++        return nullptr;
++    }
++
++    struct Laid {
++        CardRow::Kind kind;
++        SDL_Surface* left;
++        SDL_Surface* right;
++        int y;
++        int h;
++    };
++    QList<Laid> laid;
++    int leftW = 0;
++    int rightW = 0;
++    int fullW = 0;
++    int y = padTop;
++    int prev = -1;
++    for (const CardRow& row : rows) {
++        Laid item{row.kind, nullptr, nullptr, 0, 0};
++        switch (row.kind) {
++        case CardRow::Title:
++            item.left = renderGlyph(body, row.left, frame);
++            break;
++        case CardRow::Section:
++            item.left = renderGlyph(small, row.left, kMuted);
++            break;
++        case CardRow::Note:
++            item.left = renderGlyph(small, row.left, kMuted);
++            break;
++        case CardRow::Pair:
++            item.left = renderGlyph(body, row.left, row.leftColor);
++            item.right = renderGlyph(body, row.right, row.rightColor);
++            break;
++        case CardRow::Rule:
++            break;
++        }
++        y += rowGapBefore(row.kind, prev);
++        item.y = y;
++        if (row.kind == CardRow::Rule) {
++            item.h = 1;
++        }
++        else {
++            const int lh = qMax(item.left ? item.left->h : 0, item.right ? item.right->h : 0);
++            item.h = lh > 0 ? lh : TTF_FontLineSkip(body);
++        }
++        if (row.kind == CardRow::Pair) {
++            leftW = qMax(leftW, item.left ? item.left->w : 0);
++            rightW = qMax(rightW, item.right ? item.right->w : 0);
++        }
++        else if (item.left != nullptr) {
++            fullW = qMax(fullW, item.left->w);
++        }
++        y += item.h;
++        prev = row.kind;
++        laid.append(item);
++    }
++
++    const int contentW = qMax(fullW, leftW + colGap + rightW);
++    const int panelW = qBound(minPanelW, contentW + padX * 2, maxPanelW);
++    const int panelH = y + padBot;
++    SDL_Surface* card = SDL_CreateRGBSurfaceWithFormat(0, panelW, panelH, 32, SDL_PIXELFORMAT_ARGB8888);
++    if (card != nullptr) {
++        SDL_SetSurfaceBlendMode(card, SDL_BLENDMODE_NONE);
++        fillRect(card, {0, 0, panelW, panelH}, frame);
++        fillRect(card, {1, 1, panelW - 2, panelH - 2}, kNavy);
++    }
++    for (const Laid& item : laid) {
++        if (card != nullptr) {
++            if (item.kind == CardRow::Rule) {
++                fillRect(card, {padX, item.y, panelW - padX * 2, 1}, kRule);
++            }
++            if (item.left != nullptr) {
++                SDL_Rect dst{padX, item.y, item.left->w, item.left->h};
++                SDL_BlitSurface(item.left, nullptr, card, &dst);
++            }
++            if (item.right != nullptr) {
++                // Values right-aligned, like the app's <dd class="text-right">.
++                SDL_Rect dst{panelW - padX - item.right->w, item.y, item.right->w, item.right->h};
++                SDL_BlitSurface(item.right, nullptr, card, &dst);
++            }
++        }
++        SDL_FreeSurface(item.left);
++        SDL_FreeSurface(item.right);
++    }
++    TTF_CloseFont(body);
++    TTF_CloseFont(small);
++    return card != nullptr ? toArgb8888(card) : nullptr;
++}
++
++QString chordPrefix()
++{
++    return QString::fromLatin1(hotkeyNeedsShift() ? "Ctrl+Alt+Shift+" : "Ctrl+Alt+");
++}
++
++QString lowerFps(QString value)
++{
++    return value.replace(QStringLiteral(" FPS"), QStringLiteral(" fps"));
++}
++
++// Moonlight's stringifyVideoStats() lines -> sectioned label/value rows.
++QList<CardRow> statsRows(const QString& text)
++{
++    QList<CardRow> video;
++    QList<CardRow> rate;
++    QList<CardRow> latency;
++    QList<CardRow> drops;
++    QList<CardRow> other;
++    static const QRegularExpression streamRe(
++        QStringLiteral("^(\\d+x\\d+) ([\\d.]+) FPS \\(Codec: (.+)\\)$"));
++    static const QRegularExpression hostRe(
++        QStringLiteral("^([\\d.]+)/([\\d.]+)/([\\d.]+) ms$"));
++    static const QRegularExpression varianceRe(
++        QStringLiteral(" \\(variance: ([\\d.]+ ms)\\)"));
++
++    for (const QString& raw : text.split(QLatin1Char('\n'))) {
++        const QString line = raw.trimmed();
++        if (line.isEmpty()) {
++            continue;
++        }
++        const int colon = line.indexOf(QLatin1String(": "));
++        if (colon < 0) {
++            other.append(pairRow(line, {}));
++            continue;
++        }
++        const QString label = line.left(colon);
++        const QString value = line.mid(colon + 2).trimmed();
++
++        if (label == QLatin1String("Video stream")) {
++            const QRegularExpressionMatch m = streamRe.match(value);
++            if (m.hasMatch()) {
++                video.append(pairRow(QStringLiteral("Resolution"), m.captured(1)));
++                video.append(pairRow(QStringLiteral("Frame rate"), m.captured(2) + QStringLiteral(" fps")));
++                video.append(pairRow(QStringLiteral("Codec"), m.captured(3)));
++            }
++            else {
++                video.append(pairRow(QStringLiteral("Stream"), value));
++            }
++        }
++        else if (label.startsWith(QLatin1String("Bitrate"))) {
++            video.append(pairRow(QStringLiteral("Bitrate"), value));
++        }
++        else if (label == QLatin1String("Incoming frame rate from network")) {
++            rate.append(pairRow(QStringLiteral("From network"), lowerFps(value)));
++        }
++        else if (label == QLatin1String("Decoding frame rate")) {
++            rate.append(pairRow(QStringLiteral("Decoded"), lowerFps(value)));
++        }
++        else if (label == QLatin1String("Rendering frame rate")) {
++            rate.append(pairRow(QStringLiteral("Rendered"), lowerFps(value)));
++        }
++        else if (label.startsWith(QLatin1String("Host processing latency"))) {
++            const QRegularExpressionMatch m = hostRe.match(value);
++            latency.append(pairRow(QStringLiteral("Host encode"),
++                                   m.hasMatch()
++                                       ? QStringLiteral("%1 ms  (%2–%3)").arg(m.captured(3), m.captured(1), m.captured(2))
++                                       : value));
++        }
++        else if (label == QLatin1String("Average network latency")) {
++            QString rtt = value;
++            rtt.replace(varianceRe, QStringLiteral("  ± \\1"));
++            latency.append(pairRow(QStringLiteral("Network round trip"), rtt));
++        }
++        else if (label == QLatin1String("Average decoding time")) {
++            latency.append(pairRow(QStringLiteral("Decode"), value));
++        }
++        else if (label == QLatin1String("Average frame queue delay")) {
++            latency.append(pairRow(QStringLiteral("Frame queue"), value));
++        }
++        else if (label.startsWith(QLatin1String("Average rendering time"))) {
++            latency.append(pairRow(QStringLiteral("Render + V-sync"), value));
++        }
++        else if (label == QLatin1String("Frames dropped by your network connection")) {
++            drops.append(pairRow(QStringLiteral("Lost on network"), value));
++        }
++        else if (label == QLatin1String("Frames dropped due to network jitter")) {
++            drops.append(pairRow(QStringLiteral("Network jitter"), value));
++        }
++        else {
++            other.append(pairRow(label, value));
++        }
++    }
++
++    QList<CardRow> rows;
++    rows.append(titleRow(QStringLiteral("CONNECTION STATS")));
++    const auto addSection = [&rows](const QString& name, const QList<CardRow>& section) {
++        if (!section.isEmpty()) {
++            rows.append(sectionRow(name));
++            rows.append(section);
++        }
++    };
++    addSection(QStringLiteral("Video"), video);
++    addSection(QStringLiteral("Frame rate"), rate);
++    addSection(QStringLiteral("Latency"), latency);
++    addSection(QStringLiteral("Dropped frames"), drops);
++    addSection(QStringLiteral("Other"), other);
++    if (rows.size() == 1) {
++        rows.append(noteRow(QStringLiteral("Waiting for video…")));
++    }
++    rows.append(ruleRow());
++    rows.append(noteRow(chordPrefix() + QStringLiteral("S hides these stats")));
++    return rows;
++}
++
++QList<CardRow> shortcutRows()
++{
++    const QString p = chordPrefix();
++    const auto key = [&p](const char* k, const char* action) {
++        // Keys bright and actions muted, like the app's Commands list.
++        CardRow row = pairRow(p + QString::fromUtf8(k), QString::fromUtf8(action));
++        row.leftColor = kLavender;
++        row.rightColor = kMuted;
++        return row;
++    };
++    QList<CardRow> rows;
++    rows.append(titleRow(QStringLiteral("SHORTCUT KEYS")));
++    rows.append(noteRow(QStringLiteral("Hold Ctrl + left Alt%1, then the key. Not sent to the host.")
++                            .arg(hotkeyNeedsShift() ? QStringLiteral(" + Shift") : QString())));
++    rows.append(sectionRow(QStringLiteral("Stream")));
++    rows.append(key("Esc", "Disconnect all windows"));
++    rows.append(key("Q", "Close this window"));
++    rows.append(key("F", "Fullscreen this window"));
++    rows.append(sectionRow(QStringLiteral("Input")));
++    rows.append(key("K", "System keys: this PC or host"));
++    rows.append(key("M", "Mouse: desktop or game"));
++    rows.append(key("V", "Type clipboard on the host"));
++    rows.append(sectionRow(QStringLiteral("Displays")));
++    rows.append(key("-", "List host displays"));
++    rows.append(key("1–9", "This window → host display N"));
++    rows.append(key("0", "One window per host display"));
++    rows.append(sectionRow(QStringLiteral("Info")));
++    rows.append(key("S", "Connection stats"));
++    rows.append(key("?", "This list (also Ctrl+Alt+H)"));
++    rows.append(ruleRow());
++    rows.append(noteRow(QStringLiteral("Press Ctrl+Alt+? again to close.")));
++    return rows;
++}
++
 +// --- Overlay lifetime (SDL surface on OverlayStatusUpdate) ---
 +
 +class EclipseUiListener : public QThread
@@ -885,6 +1207,10 @@ index 00000000..02304401
 +                g_audioEnabled.store(trimmed.endsWith('1') ? 1 : 0);
 +                continue;
 +            }
++            if (trimmed.startsWith("stream-ui ")) {
++                eclipseStreamUiSetEnabled(trimmed.endsWith('1'));
++                continue;
++            }
 +            SDL_Event event = {};
 +            event.type = SDL_USEREVENT;
 +            event.user.code = SDL_CODE_ECLIPSE_DISPLAY_MAP;
@@ -906,6 +1232,8 @@ index 00000000..02304401
 +// Non-interactive hint card. Shares the OverlayStatusUpdate slot with the
 +// display map, which wins: a hint never replaces or clears a visible map.
 +quint32 g_hintUntil = 0;
++// The hint slot currently holds the shortcut list (Ctrl+Alt+?), not a mouse hint.
++bool g_helpShown = false;
 +
 +void hideDisplayMapOverlay()
 +{
@@ -927,6 +1255,7 @@ index 00000000..02304401
 +        return;
 +    }
 +    g_hintUntil = 0;
++    g_helpShown = false;
 +    Session* session = Session::get();
 +    if (session && g_overlayUntil == 0) {
 +        session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, nullptr);
@@ -988,6 +1317,61 @@ index 00000000..02304401
 +    applyHotkeyShift(shift);
 +}
 +
++SDL_Surface* eclipseRenderStatsCard(const char* text)
++{
++    if (text == nullptr || text[0] == '\0') {
++        return nullptr;
++    }
++    return renderEclipseRowsCard(statsRows(QString::fromUtf8(text)), kGold);
++}
++
++void eclipseToggleShortcutHelp()
++{
++    Session* session = Session::get();
++    if (!session) {
++        return;
++    }
++    if (g_helpShown) {
++        hideHintOverlay();
++        return;
++    }
++    if (g_overlayUntil != 0) {
++        hideDisplayMapOverlay();
++    }
++    SDL_Surface* card = renderEclipseRowsCard(shortcutRows(), kGold);
++    if (card == nullptr) {
++        return;
++    }
++    session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, card);
++    g_hintUntil = SDL_GetTicks() + 20000;
++    if (g_hintUntil == 0) {
++        g_hintUntil = 1;
++    }
++    g_helpShown = true;
++}
++
++bool eclipseHandleHelpHotkey(const SDL_KeyboardEvent* event)
++{
++    if (!event || event->state != SDL_PRESSED || event->repeat) {
++        return false;
++    }
++    const Uint16 mod = event->keysym.mod;
++    if (!(mod & KMOD_CTRL) || !(mod & KMOD_LALT) || (mod & (KMOD_GUI | KMOD_MODE))) {
++        return false;
++    }
++    // "?" is Shift+/ on US layouts, so accept / and ? with or without Shift.
++    const bool question = event->keysym.sym == SDLK_SLASH ||
++                          event->keysym.sym == SDLK_QUESTION ||
++                          event->keysym.scancode == SDL_SCANCODE_SLASH;
++    // H is the layout-independent fallback and follows the normal chord.
++    const bool help = event->keysym.sym == SDLK_h && eclipseIsHotkeyChord(event);
++    if (!question && !help) {
++        return false;
++    }
++    eclipseToggleShortcutHelp();
++    return true;
++}
++
 +SDL_Surface* eclipseRenderTextCard(const char* text, EclipseCardTone tone, const char* heading)
 +{
 +    if (text == nullptr || text[0] == '\0') {
@@ -1009,6 +1393,42 @@ index 00000000..02304401
 +    // Alerts have no separate title: their first line is the headline.
 +    style.headingLines = 1;
 +    return renderEclipseCard(body, nullptr, false, style);
++}
++
++QString eclipseHotkeyPrefix()
++{
++    return chordPrefix();
++}
++
++QList<EclipseHostDisplay> eclipseHostDisplays()
++{
++    QList<EclipseHostDisplay> out;
++    Session* session = Session::get();
++    if (!session || !session->eclipsePreferences()) {
++        return out;
++    }
++    const QString map = resolveDisplayMap(QString(), session->eclipsePreferences()->eclipseDisplayMap);
++    const int active = session->eclipsePreferences()->hostDisplayIndex;
++    for (const QString& line : displayMapRows(map)) {
++        const QStringList cols = displayMapCols(line.trimmed());
++        if (cols.size() < 3) {
++            continue;
++        }
++        bool ok = false;
++        const int index = cols.at(0).toInt(&ok);
++        if (!ok) {
++            continue;
++        }
++        out.append(EclipseHostDisplay{index, cols.at(1), cols.at(2), index == active});
++    }
++    return out;
++}
++
++void eclipseSwitchDisplay(int displayNumber)
++{
++    char buf[48];
++    snprintf(buf, sizeof(buf), "switch-display %d %u", displayNumber, eclipsePid());
++    eclipseControl(buf, 2000);
 +}
 +
 +bool eclipseAudioEnabled()
@@ -1036,6 +1456,7 @@ index 00000000..02304401
 +        return;
 +    }
 +    session->getOverlayManager().setOverlaySurface(Overlay::OverlayStatusUpdate, card);
++    g_helpShown = false;
 +    g_hintUntil = SDL_GetTicks() + static_cast<quint32>(ms);
 +    if (g_hintUntil == 0) {
 +        g_hintUntil = 1;
@@ -1072,11 +1493,14 @@ index 00000000..02304401
 +    eclipseStopUiListener();
 +    g_listener = new EclipseUiListener();
 +    g_listener->start();
++    eclipseStreamUiStart();
 +}
 +
 +void eclipseStopUiListener()
 +{
++    eclipseStreamUiStop();
 +    g_hintUntil = 0;
++    g_helpShown = false;
 +    hideDisplayMapOverlay();
 +    if (!g_listener) {
 +        return;
@@ -1095,6 +1519,7 @@ index 00000000..02304401
 +    if (g_hintUntil != 0 && SDL_TICKS_PASSED(SDL_GetTicks(), g_hintUntil)) {
 +        hideHintOverlay();
 +    }
++    eclipseStreamUiPoll();
 +}
 +
 +bool eclipseOverlayHandlesKey(const SDL_KeyboardEvent* event)
@@ -1203,6 +1628,7 @@ index 00000000..02304401
 +    }
 +    g_lastPopupTicks = now;
 +    g_hintUntil = 0;
++    g_helpShown = false;
 +
 +    Session* session = Session::get();
 +    if (!session) {
@@ -1238,15 +1664,16 @@ index 00000000..02304401
 +}
 diff --git a/app/streaming/eclipsepopup.h b/app/streaming/eclipsepopup.h
 new file mode 100644
-index 00000000..c187dc0f
+index 00000000..14f557d0
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.h
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,200 @@
 +#pragma once
 +
 +#include "SDL_compat.h"
 +
 +#include <QByteArray>
++#include <QList>
 +#include <QString>
 +
 +#define SDL_CODE_ECLIPSE_DISPLAY_MAP 106
@@ -1301,6 +1728,53 @@ index 00000000..c187dc0f
 + *         unavailable (callers fall back to Moonlight's outlined text).
 + */
 +SDL_Surface* eclipseRenderTextCard(const char* text, EclipseCardTone tone, const char* heading);
++
++/**
++ * @brief Render Moonlight's video stats text as a sectioned Eclipse card.
++ *
++ * Splits the `Label: value` lines into Video / Frame rate / Latency /
++ * Dropped frames sections with right-aligned values. Safe on the decoder
++ * thread. Returns nullptr if the font is unavailable.
++ */
++SDL_Surface* eclipseRenderStatsCard(const char* text);
++
++/**
++ * @brief Current shortcut chord prefix, e.g. "Ctrl+Alt+" or "Ctrl+Alt+Shift+".
++ */
++QString eclipseHotkeyPrefix();
++
++/**
++ * @brief One host display from the Eclipse display map.
++ */
++struct EclipseHostDisplay {
++    int index;        ///< 0-based host display index.
++    QString shortcut; ///< e.g. "Ctrl+Alt+1".
++    QString name;     ///< Host output name.
++    bool current;     ///< This window streams it.
++};
++
++/**
++ * @brief Host displays known to this window (`ECLIPSE_DISPLAY_MAP`).
++ */
++QList<EclipseHostDisplay> eclipseHostDisplays();
++
++/**
++ * @brief Retarget this window to host display @p displayNumber (1-based).
++ */
++void eclipseSwitchDisplay(int displayNumber);
++
++/**
++ * @brief Show or hide the in-stream shortcut list card.
++ */
++void eclipseToggleShortcutHelp();
++
++/**
++ * @brief Consume Ctrl+left Alt+? (or / , with or without Shift) and
++ *        Ctrl+Alt+H; toggles the shortcut list.
++ *
++ * @return true when the key should not be sent to the host.
++ */
++bool eclipseHandleHelpHotkey(const SDL_KeyboardEvent* event);
 +
 +/**
 + * @brief Whether this window plays stream audio.
@@ -1394,6 +1868,851 @@ index 00000000..c187dc0f
 +                                const QString& hostList,
 +                                int activeIndex,
 +                                const QString& activeName);
+diff --git a/app/streaming/eclipsestreamui.cpp b/app/streaming/eclipsestreamui.cpp
+new file mode 100644
+index 00000000..cda09ca7
+--- /dev/null
++++ b/app/streaming/eclipsestreamui.cpp
+@@ -0,0 +1,775 @@
++#include "eclipsestreamui.h"
++
++#include "streaming/eclipsepopup.h"
++#include "streaming/session.h"
++
++#include <QColor>
++#include <QFile>
++#include <QImage>
++#include <QList>
++#include <QPainter>
++#include <QSvgRenderer>
++
++#include <SDL_ttf.h>
++
++#include <atomic>
++#include <cmath>
++#include <functional>
++
++namespace {
++
++// App palette (src/index.css), pre-blended where the app uses opacity.
++const SDL_Color kNavy{0x0F, 0x0F, 0x29, 0xFF};
++const SDL_Color kGold{0xF7, 0xC7, 0x08, 0xFF};
++const SDL_Color kLavender{0xD9, 0xD9, 0xFC, 0xFF};
++const SDL_Color kMuted{0x9C, 0x9C, 0xBD, 0xFF};
++const SDL_Color kRule{0x33, 0x33, 0x4F, 0xFF};
++
++const float kDefaultX = 0.97f;
++const float kDefaultY = 0.03f;
++
++std::atomic<int> g_pendingEnabled{-1};
++std::atomic<bool> g_needsRefresh{false};
++
++struct MenuItem {
++    QString label;
++    QString state;
++    QString key;
++    bool checked = false;
++    std::function<void()> run;
++    SDL_Rect rect = {};
++};
++
++struct MenuEntry {
++    enum Kind { Section, Item };
++    Kind kind;
++    QString text;
++    MenuItem item;
++};
++
++struct UiState {
++    bool started = false;
++    bool enabled = false;
++    bool visible = false;
++    bool menuOpen = false;
++
++    float anchorX = kDefaultX;
++    float anchorY = kDefaultY;
++
++    // Last layout, in window pixels (drawable), top-left Y-down.
++    float scale = 1.0f;
++    int viewW = 0;
++    int viewH = 0;
++    SDL_Rect composite = {};
++    SDL_Rect logo = {};
++    SDL_Rect menu = {};
++    QList<MenuEntry> entries;
++    int hover = -1;
++    QString stateKey;
++
++    // Pointer interaction.
++    bool pressOnLogo = false;
++    bool dragging = false;
++    int pressX = 0;
++    int pressY = 0;
++    int pressLogoX = 0;
++    int pressLogoY = 0;
++    int pressedItem = -1;
++    bool swallowUp = false;
++    bool cursorForced = false;
++    int cursorBefore = SDL_ENABLE;
++};
++
++UiState g_ui;
++
++// --- Fonts and glyphs ---
++
++TTF_Font* openFont(const char* resource, int pixelSize)
++{
++    static const QByteArray mono = [] {
++        QFile file(QStringLiteral(":/res/eclipse/JetBrainsMono-Regular.ttf"));
++        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
++    }();
++    static const QByteArray title = [] {
++        QFile file(QStringLiteral(":/res/eclipse/Remboy-Regular.ttf"));
++        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
++    }();
++    const QByteArray& data = (qstrcmp(resource, "title") == 0 && !title.isEmpty()) ? title : mono;
++    if (data.isEmpty() || TTF_WasInit() == 0) {
++        return nullptr;
++    }
++    return TTF_OpenFontRW(SDL_RWFromConstMem(data.constData(), data.size()), 1, pixelSize);
++}
++
++SDL_Surface* glyph(TTF_Font* font, const QString& text, SDL_Color color)
++{
++    if (font == nullptr || text.isEmpty()) {
++        return nullptr;
++    }
++    const QByteArray utf8 = text.toUtf8();
++    SDL_Surface* s = TTF_RenderUTF8_Blended(font, utf8.constData(), color);
++    if (s != nullptr && s->format->format != SDL_PIXELFORMAT_ARGB8888) {
++        SDL_Surface* c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_ARGB8888, 0);
++        SDL_FreeSurface(s);
++        s = c;
++    }
++    return s;
++}
++
++void fill(SDL_Surface* dst, SDL_Rect rect, SDL_Color color)
++{
++    SDL_FillRect(dst, &rect, SDL_MapRGBA(dst->format, color.r, color.g, color.b, color.a));
++}
++
++void frame(SDL_Surface* dst, SDL_Rect rect, int border, SDL_Color edge, SDL_Color body)
++{
++    fill(dst, rect, edge);
++    fill(dst, {rect.x + border, rect.y + border, rect.w - 2 * border, rect.h - 2 * border}, body);
++}
++
++void blit(SDL_Surface* src, SDL_Surface* dst, int x, int y)
++{
++    if (src == nullptr) {
++        return;
++    }
++    SDL_Rect r{x, y, src->w, src->h};
++    SDL_BlitSurface(src, nullptr, dst, &r);
++}
++
++// Pixel-art logo (res/eclipse-logo.svg) tinted to @p color.
++SDL_Surface* logoSurface(int size, SDL_Color color)
++{
++    QSvgRenderer svg(QStringLiteral(":/res/eclipse-logo.svg"));
++    if (!svg.isValid() || size <= 0) {
++        return nullptr;
++    }
++    QImage image(size, size, QImage::Format_ARGB32_Premultiplied);
++    image.fill(Qt::transparent);
++    {
++        QPainter painter(&image);
++        svg.render(&painter);
++        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
++        painter.fillRect(image.rect(), QColor(color.r, color.g, color.b));
++    }
++    image = image.convertToFormat(QImage::Format_ARGB32);
++    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_ARGB8888);
++    if (s == nullptr) {
++        return nullptr;
++    }
++    for (int row = 0; row < size; row++) {
++        memcpy(static_cast<Uint8*>(s->pixels) + row * s->pitch, image.constScanLine(row), size * 4);
++    }
++    SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_BLEND);
++    return s;
++}
++
++// --- Window metrics ---
++
++bool viewMetrics(int* pixelW, int* pixelH, float* scale)
++{
++    Session* session = Session::get();
++    SDL_Window* window = session ? session->eclipseWindow() : nullptr;
++    if (window == nullptr) {
++        return false;
++    }
++    int w = 0;
++    int h = 0;
++    SDL_GetWindowSize(window, &w, &h);
++    int pw = w;
++    int ph = h;
++#if SDL_VERSION_ATLEAST(2, 26, 0)
++    SDL_GetWindowSizeInPixels(window, &pw, &ph);
++#endif
++    if (w <= 0 || h <= 0 || pw <= 0 || ph <= 0) {
++        return false;
++    }
++    *pixelW = pw;
++    *pixelH = ph;
++    *scale = SDL_max(1.0f, (float)pw / (float)w);
++    return true;
++}
++
++int px(float v)
++{
++    return (int)std::lround(v * g_ui.scale);
++}
++
++// Event coordinates are in window units; the layout is in drawable pixels.
++void toPixels(int x, int y, int* outX, int* outY)
++{
++    Session* session = Session::get();
++    SDL_Window* window = session ? session->eclipseWindow() : nullptr;
++    int w = 0;
++    int h = 0;
++    if (window != nullptr) {
++        SDL_GetWindowSize(window, &w, &h);
++    }
++    const float sx = w > 0 ? (float)g_ui.viewW / (float)w : 1.0f;
++    const float sy = h > 0 ? (float)g_ui.viewH / (float)h : 1.0f;
++    *outX = (int)(x * sx);
++    *outY = (int)(y * sy);
++}
++
++bool inRect(int x, int y, const SDL_Rect& r)
++{
++    const SDL_Point p{x, y};
++    return SDL_PointInRect(&p, &r) == SDL_TRUE;
++}
++
++// --- Menu model (same actions as the Ctrl+Alt shortcuts) ---
++
++QList<MenuEntry> buildEntries()
++{
++    QList<MenuEntry> entries;
++    Session* session = Session::get();
++    SdlInputHandler* input = session ? session->eclipseInputHandler() : nullptr;
++    SDL_Window* window = session ? session->eclipseWindow() : nullptr;
++    if (session == nullptr || input == nullptr) {
++        return entries;
++    }
++    const QString p = eclipseHotkeyPrefix();
++    const auto section = [&entries](const QString& text) {
++        entries.append(MenuEntry{MenuEntry::Section, text.toUpper(), {}});
++    };
++    const auto item = [&entries](const QString& label, const QString& state, const QString& key,
++                                 std::function<void()> run, bool checked = false) {
++        MenuItem m;
++        m.label = label;
++        m.state = state;
++        m.key = key;
++        m.checked = checked;
++        m.run = std::move(run);
++        entries.append(MenuEntry{MenuEntry::Item, {}, m});
++    };
++
++    const bool fullscreen = window && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN);
++    const bool stats = session->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug);
++
++    section(QStringLiteral("Stream"));
++    item(QStringLiteral("Fullscreen"), fullscreen ? QStringLiteral("On") : QStringLiteral("Off"), p + "F",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::ToggleFullScreen); });
++    item(QStringLiteral("Close this window"), {}, p + "Q",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::Quit); });
++    item(QStringLiteral("Disconnect all windows"), {}, p + "Esc", [input] {
++        eclipseControl("disconnect-all");
++        input->eclipseRunAction(SdlInputHandler::EclipseAction::Quit);
++    });
++
++    section(QStringLiteral("Input"));
++    item(QStringLiteral("Mouse mode"),
++         input->eclipseAbsoluteMouseMode() ? QStringLiteral("Desktop") : QStringLiteral("Game"), p + "M",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::ToggleMouseMode); });
++    item(QStringLiteral("System keys go to"),
++         input->isSystemKeyCaptureActive() ? QStringLiteral("Host") : QStringLiteral("This PC"), p + "K",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::ToggleSystemKeys); });
++    item(QStringLiteral("Type clipboard on host"), {}, p + "V",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::PasteText); });
++
++    const QList<EclipseHostDisplay> displays = eclipseHostDisplays();
++    section(QStringLiteral("Displays"));
++    for (const EclipseHostDisplay& d : displays) {
++        const int n = d.index + 1;
++        item(d.name, d.current ? QStringLiteral("This window") : QString(), d.shortcut,
++             [n] { eclipseSwitchDisplay(n); }, d.current);
++    }
++    item(QStringLiteral("Show host displays"), {}, p + "-", [] { eclipseRequestShowDisplays(); });
++    item(QStringLiteral("One window per display"), {}, p + "0", [] { eclipseControl("open-all", 2000); });
++
++    section(QStringLiteral("Info"));
++    item(QStringLiteral("Connection stats"), stats ? QStringLiteral("On") : QStringLiteral("Off"), p + "S",
++         [input] { input->eclipseRunAction(SdlInputHandler::EclipseAction::ToggleStatsOverlay); });
++    item(QStringLiteral("Shortcut keys"), {}, p + "?", [] { eclipseToggleShortcutHelp(); });
++    return entries;
++}
++
++QString stateKeyFor(const QList<MenuEntry>& entries)
++{
++    QString key;
++    for (const MenuEntry& e : entries) {
++        key += e.text + e.item.label + e.item.state + QLatin1Char('|');
++    }
++    return key;
++}
++
++// --- Rendering ---
++
++void clearOverlay()
++{
++    Session* session = Session::get();
++    if (session) {
++        session->getOverlayManager().setOverlaySurface(Overlay::OverlayEclipseUi, nullptr);
++    }
++}
++
++void render()
++{
++    Session* session = Session::get();
++    if (!session || !g_ui.visible) {
++        clearOverlay();
++        return;
++    }
++    if (!viewMetrics(&g_ui.viewW, &g_ui.viewH, &g_ui.scale)) {
++        return;
++    }
++
++    const int button = px(40);
++    const int border = SDL_max(1, px(1));
++    const int iconSize = px(32);
++    const int freeW = SDL_max(0, g_ui.viewW - button);
++    const int freeH = SDL_max(0, g_ui.viewH - button);
++    int logoX = (int)std::lround(g_ui.anchorX * freeW);
++    int logoY = (int)std::lround(g_ui.anchorY * freeH);
++
++    // Menu layout.
++    TTF_Font* body = nullptr;
++    TTF_Font* small = nullptr;
++    TTF_Font* title = nullptr;
++    QList<SDL_Surface*> owned;
++    struct Row {
++        int entry;
++        SDL_Surface* left;
++        SDL_Surface* state;
++        SDL_Surface* key;
++        SDL_Surface* leftHover;
++        SDL_Surface* stateHover;
++        SDL_Surface* keyHover;
++        int y;
++        int h;
++    };
++    QList<Row> rows;
++    SDL_Surface* titleGlyph = nullptr;
++    SDL_Surface* footGlyph = nullptr;
++    int menuW = 0;
++    int menuH = 0;
++    const int padX = px(16);
++    const int padY = px(14);
++    const int rowPadY = px(5);
++    const int colGap = px(24);
++    const int keyGap = px(14);
++    const int checkW = px(14);
++
++    if (g_ui.menuOpen) {
++        g_ui.entries = buildEntries();
++        g_ui.stateKey = stateKeyFor(g_ui.entries);
++        body = openFont("mono", px(14));
++        small = openFont("mono", px(12));
++        title = openFont("title", px(20));
++        if (body == nullptr || small == nullptr) {
++            g_ui.menuOpen = false;
++        }
++    }
++
++    if (g_ui.menuOpen) {
++        titleGlyph = glyph(title ? title : body, QStringLiteral("Eclipse"), kGold);
++        footGlyph = glyph(small, QStringLiteral("Drag the logo to move it"), kMuted);
++        int y = padY;
++        int leftW = 0;
++        int rightW = 0;
++        if (titleGlyph) {
++            y += titleGlyph->h;
++        }
++        for (int i = 0; i < g_ui.entries.size(); i++) {
++            const MenuEntry& e = g_ui.entries.at(i);
++            Row r{i, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0};
++            if (e.kind == MenuEntry::Section) {
++                y += px(i == 0 ? 10 : 14);
++                r.left = glyph(small, e.text, kMuted);
++                r.y = y;
++                r.h = r.left ? r.left->h : px(14);
++                y += r.h + px(4);
++            }
++            else {
++                const QString label = e.item.label;
++                r.left = glyph(body, label, kLavender);
++                r.state = glyph(body, e.item.state, e.item.checked ? kGold : kLavender);
++                r.key = glyph(small, e.item.key, kMuted);
++                r.leftHover = glyph(body, label, kNavy);
++                r.stateHover = glyph(body, e.item.state, kNavy);
++                r.keyHover = glyph(small, e.item.key, kNavy);
++                const int lh = qMax(r.left ? r.left->h : 0, r.state ? r.state->h : 0);
++                r.y = y;
++                r.h = lh + rowPadY * 2;
++                leftW = qMax(leftW, checkW + (r.left ? r.left->w : 0));
++                rightW = qMax(rightW, (r.state ? r.state->w + keyGap : 0) + (r.key ? r.key->w : 0));
++                y += r.h;
++            }
++            rows.append(r);
++        }
++        y += px(10);
++        const int ruleY = y;
++        Q_UNUSED(ruleY);
++        y += 1 + px(10);
++        if (footGlyph) {
++            y += footGlyph->h;
++        }
++        y += padY;
++        menuW = qMax(qMax(titleGlyph ? titleGlyph->w : 0, footGlyph ? footGlyph->w : 0),
++                     leftW + colGap + rightW) + padX * 2;
++        menuW = qMax(menuW, px(300));
++        menuH = y;
++    }
++
++    // Composite: logo plus menu, opening toward the middle of the window.
++    SDL_Rect logoRect{0, 0, button, button};
++    SDL_Rect menuRect{0, 0, menuW, menuH};
++    SDL_Rect comp{logoX, logoY, button, button};
++    if (g_ui.menuOpen) {
++        const int gap = px(6);
++        const bool openLeft = logoX + button / 2 > g_ui.viewW / 2;
++        const bool openUp = logoY + button / 2 > g_ui.viewH / 2;
++        int mx = openLeft ? logoX + button - menuW : logoX;
++        int my = openUp ? logoY - gap - menuH : logoY + button + gap;
++        mx = SDL_clamp(mx, 0, SDL_max(0, g_ui.viewW - menuW));
++        my = SDL_clamp(my, 0, SDL_max(0, g_ui.viewH - menuH));
++        const int x0 = SDL_min(logoX, mx);
++        const int y0 = SDL_min(logoY, my);
++        const int x1 = SDL_max(logoX + button, mx + menuW);
++        const int y1 = SDL_max(logoY + button, my + menuH);
++        comp = {x0, y0, x1 - x0, y1 - y0};
++        menuRect = {mx - x0, my - y0, menuW, menuH};
++    }
++    logoRect.x = logoX - comp.x;
++    logoRect.y = logoY - comp.y;
++
++    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, comp.w, comp.h, 32, SDL_PIXELFORMAT_ARGB8888);
++    if (surface != nullptr) {
++        SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
++        // Logo button: navy with gold frame; gold fill while the menu is open.
++        const bool active = g_ui.menuOpen;
++        frame(surface, logoRect, border, kGold, active ? kGold : kNavy);
++        SDL_Surface* icon = logoSurface(iconSize, active ? kNavy : kLavender);
++        blit(icon, surface, logoRect.x + (button - iconSize) / 2, logoRect.y + (button - iconSize) / 2);
++        SDL_FreeSurface(icon);
++
++        if (g_ui.menuOpen) {
++            frame(surface, menuRect, border, kGold, kNavy);
++            const int mx = menuRect.x;
++            const int my = menuRect.y;
++            blit(titleGlyph, surface, mx + padX, my + padY);
++            for (Row& r : rows) {
++                MenuEntry& e = g_ui.entries[r.entry];
++                if (e.kind == MenuEntry::Section) {
++                    blit(r.left, surface, mx + padX, my + r.y);
++                    continue;
++                }
++                SDL_Rect rowRect{mx + border, my + r.y, menuW - border * 2, r.h};
++                const bool hover = r.entry == g_ui.hover;
++                if (hover) {
++                    // Like the app's buttons: hover:bg-sunshine hover:text-eclipse.
++                    fill(surface, rowRect, kGold);
++                }
++                if (e.item.checked) {
++                    fill(surface, {mx + padX, my + r.y + r.h / 2 - px(3), px(6), px(6)}, hover ? kNavy : kGold);
++                }
++                SDL_Surface* left = hover ? r.leftHover : r.left;
++                SDL_Surface* state = hover ? r.stateHover : r.state;
++                SDL_Surface* key = hover ? r.keyHover : r.key;
++                const int textY = my + r.y + rowPadY;
++                blit(left, surface, mx + padX + checkW, textY);
++                int right = mx + menuW - padX;
++                if (key) {
++                    right -= key->w;
++                    blit(key, surface, right, textY + ((left ? left->h : key->h) - key->h) / 2);
++                    right -= keyGap;
++                }
++                if (state) {
++                    blit(state, surface, right - state->w, textY);
++                }
++                // Hit rect relative to the window drawable.
++                e.item.rect = {comp.x + rowRect.x, comp.y + rowRect.y, rowRect.w, rowRect.h};
++            }
++            const int footTop = my + menuH - padY - (footGlyph ? footGlyph->h : 0);
++            fill(surface, {mx + padX, footTop - px(10) - 1, menuW - padX * 2, 1}, kRule);
++            blit(footGlyph, surface, mx + padX, footTop);
++        }
++    }
++
++    for (Row& r : rows) {
++        SDL_FreeSurface(r.left);
++        SDL_FreeSurface(r.state);
++        SDL_FreeSurface(r.key);
++        SDL_FreeSurface(r.leftHover);
++        SDL_FreeSurface(r.stateHover);
++        SDL_FreeSurface(r.keyHover);
++    }
++    SDL_FreeSurface(titleGlyph);
++    SDL_FreeSurface(footGlyph);
++    if (body) {
++        TTF_CloseFont(body);
++    }
++    if (small) {
++        TTF_CloseFont(small);
++    }
++    if (title) {
++        TTF_CloseFont(title);
++    }
++    if (surface == nullptr) {
++        return;
++    }
++
++    g_ui.composite = comp;
++    g_ui.logo = {logoX, logoY, button, button};
++    g_ui.menu = g_ui.menuOpen ? SDL_Rect{comp.x + menuRect.x, comp.y + menuRect.y, menuW, menuH} : SDL_Rect{};
++
++    // Renderers place the overlay from fractions of their own free space.
++    const int cFreeW = g_ui.viewW - comp.w;
++    const int cFreeH = g_ui.viewH - comp.h;
++    Overlay::OverlayManager& om = session->getOverlayManager();
++    om.setOverlayAnchor(Overlay::OverlayEclipseUi,
++                        cFreeW > 0 ? (float)comp.x / cFreeW : 0.0f,
++                        cFreeH > 0 ? (float)comp.y / cFreeH : 0.0f);
++    om.setOverlaySurface(Overlay::OverlayEclipseUi, surface);
++}
++
++void setMenuOpen(bool open)
++{
++    if (g_ui.menuOpen == open) {
++        return;
++    }
++    g_ui.menuOpen = open;
++    g_ui.hover = -1;
++    g_ui.pressedItem = -1;
++    render();
++}
++
++int itemAt(int x, int y)
++{
++    if (!g_ui.menuOpen || !inRect(x, y, g_ui.menu)) {
++        return -1;
++    }
++    for (int i = 0; i < g_ui.entries.size(); i++) {
++        const MenuEntry& e = g_ui.entries.at(i);
++        if (e.kind == MenuEntry::Item && inRect(x, y, e.item.rect)) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++void setCursorForced(bool forced)
++{
++    if (forced == g_ui.cursorForced) {
++        return;
++    }
++    if (forced) {
++        g_ui.cursorBefore = SDL_ShowCursor(SDL_QUERY);
++        SDL_ShowCursor(SDL_ENABLE);
++    }
++    else {
++        SDL_ShowCursor(g_ui.cursorBefore);
++    }
++    g_ui.cursorForced = forced;
++}
++
++bool pointerOverUi(int x, int y)
++{
++    return inRect(x, y, g_ui.logo) || (g_ui.menuOpen && inRect(x, y, g_ui.menu));
++}
++
++bool interactive()
++{
++    // Captured game mouse has no visible pointer; the logo hides meanwhile.
++    return g_ui.visible && !SDL_GetRelativeMouseMode();
++}
++
++void reportPosition()
++{
++    char buf[48];
++    snprintf(buf, sizeof(buf), "ui-pos %.3f %.3f", g_ui.anchorX, g_ui.anchorY);
++    eclipseControl(buf);
++}
++
++} // namespace
++
++void eclipseStreamUiStart()
++{
++    g_ui = UiState{};
++    g_ui.started = true;
++    g_ui.enabled = qgetenv("ECLIPSE_STREAM_UI") == "1";
++    const QList<QByteArray> pos = qgetenv("ECLIPSE_UI_POS").split(',');
++    if (pos.size() == 2) {
++        bool okX = false;
++        bool okY = false;
++        const float x = pos.at(0).toFloat(&okX);
++        const float y = pos.at(1).toFloat(&okY);
++        if (okX && okY) {
++            g_ui.anchorX = SDL_clamp(x, 0.0f, 1.0f);
++            g_ui.anchorY = SDL_clamp(y, 0.0f, 1.0f);
++        }
++    }
++    g_pendingEnabled.store(-1);
++    g_needsRefresh.store(true);
++}
++
++void eclipseStreamUiStop()
++{
++    setCursorForced(false);
++    if (g_ui.visible) {
++        clearOverlay();
++    }
++    g_ui = UiState{};
++}
++
++void eclipseStreamUiNeedsRefresh()
++{
++    g_needsRefresh.store(true);
++}
++
++void eclipseStreamUiSetEnabled(bool enabled)
++{
++    g_pendingEnabled.store(enabled ? 1 : 0);
++}
++
++void eclipseStreamUiPoll()
++{
++    if (!g_ui.started || Session::get() == nullptr) {
++        return;
++    }
++    const int pending = g_pendingEnabled.exchange(-1);
++    if (pending >= 0) {
++        g_ui.enabled = pending != 0;
++        g_needsRefresh.store(true);
++    }
++
++    const bool shouldShow = g_ui.enabled && !SDL_GetRelativeMouseMode();
++    bool refresh = g_needsRefresh.exchange(false);
++    if (shouldShow != g_ui.visible) {
++        g_ui.visible = shouldShow;
++        if (!shouldShow) {
++            g_ui.menuOpen = false;
++            g_ui.dragging = false;
++            g_ui.pressOnLogo = false;
++            setCursorForced(false);
++        }
++        refresh = true;
++    }
++
++    if (g_ui.visible && !refresh) {
++        int w = 0;
++        int h = 0;
++        float scale = 1.0f;
++        if (viewMetrics(&w, &h, &scale) && (w != g_ui.viewW || h != g_ui.viewH)) {
++            refresh = true;
++        }
++        else if (g_ui.menuOpen && stateKeyFor(buildEntries()) != g_ui.stateKey) {
++            // A shortcut changed a toggle while the menu was open.
++            refresh = true;
++        }
++    }
++    if (refresh) {
++        render();
++    }
++}
++
++bool eclipseStreamUiHandleButton(const SDL_MouseButtonEvent* event)
++{
++    if (event == nullptr || event->which == SDL_TOUCH_MOUSEID || !interactive()) {
++        return false;
++    }
++    int x = 0;
++    int y = 0;
++    toPixels(event->x, event->y, &x, &y);
++
++    if (event->state == SDL_PRESSED) {
++        if (inRect(x, y, g_ui.logo)) {
++            if (event->button == SDL_BUTTON_LEFT) {
++                g_ui.pressOnLogo = true;
++                g_ui.dragging = false;
++                g_ui.pressX = x;
++                g_ui.pressY = y;
++                g_ui.pressLogoX = g_ui.logo.x;
++                g_ui.pressLogoY = g_ui.logo.y;
++            }
++            return true;
++        }
++        if (g_ui.menuOpen) {
++            if (inRect(x, y, g_ui.menu)) {
++                g_ui.pressedItem = event->button == SDL_BUTTON_LEFT ? itemAt(x, y) : -1;
++                return true;
++            }
++            // Click outside closes the menu and stays local.
++            setMenuOpen(false);
++            g_ui.swallowUp = true;
++            return true;
++        }
++        return false;
++    }
++
++    // Release.
++    if (g_ui.swallowUp) {
++        g_ui.swallowUp = false;
++        return true;
++    }
++    if (g_ui.pressOnLogo && event->button == SDL_BUTTON_LEFT) {
++        const bool dragged = g_ui.dragging;
++        g_ui.pressOnLogo = false;
++        g_ui.dragging = false;
++        if (dragged) {
++            reportPosition();
++        }
++        else {
++            setMenuOpen(!g_ui.menuOpen);
++        }
++        return true;
++    }
++    if (g_ui.menuOpen && inRect(x, y, g_ui.menu)) {
++        const int item = itemAt(x, y);
++        if (event->button == SDL_BUTTON_LEFT && item >= 0 && item == g_ui.pressedItem) {
++            const std::function<void()> run = g_ui.entries.at(item).item.run;
++            g_ui.pressedItem = -1;
++            setMenuOpen(false);
++            if (run) {
++                run();
++            }
++            g_needsRefresh.store(true);
++        }
++        return true;
++    }
++    return pointerOverUi(x, y);
++}
++
++bool eclipseStreamUiHandleMotion(const SDL_MouseMotionEvent* event)
++{
++    if (event == nullptr || event->which == SDL_TOUCH_MOUSEID || !interactive()) {
++        setCursorForced(false);
++        return false;
++    }
++    int x = 0;
++    int y = 0;
++    toPixels(event->x, event->y, &x, &y);
++
++    if (g_ui.pressOnLogo) {
++        const int dx = x - g_ui.pressX;
++        const int dy = y - g_ui.pressY;
++        if (!g_ui.dragging && (std::abs(dx) > px(4) || std::abs(dy) > px(4))) {
++            g_ui.dragging = true;
++            g_ui.menuOpen = false;
++            g_ui.hover = -1;
++        }
++        if (g_ui.dragging) {
++            const int button = g_ui.logo.w;
++            const int freeW = SDL_max(1, g_ui.viewW - button);
++            const int freeH = SDL_max(1, g_ui.viewH - button);
++            const int lx = SDL_clamp(g_ui.pressLogoX + dx, 0, freeW);
++            const int ly = SDL_clamp(g_ui.pressLogoY + dy, 0, freeH);
++            g_ui.anchorX = (float)lx / freeW;
++            g_ui.anchorY = (float)ly / freeH;
++            render();
++            setCursorForced(true);
++            // The host pointer stays put while the logo moves.
++            return true;
++        }
++    }
++
++    // Show this PC's cursor over the controls (absolute mode hides it).
++    setCursorForced(pointerOverUi(x, y));
++
++    if (g_ui.menuOpen) {
++        const int hover = itemAt(x, y);
++        if (hover != g_ui.hover) {
++            g_ui.hover = hover;
++            render();
++        }
++    }
++    return false;
++}
+diff --git a/app/streaming/eclipsestreamui.h b/app/streaming/eclipsestreamui.h
+new file mode 100644
+index 00000000..32cf887e
+--- /dev/null
++++ b/app/streaming/eclipsestreamui.h
+@@ -0,0 +1,58 @@
++#pragma once
++
++#include "SDL_compat.h"
++
++/**
++ * @file eclipsestreamui.h
++ * @brief Mouse-assisted stream controls: a draggable Eclipse logo that opens a
++ *        menu of the in-stream shortcut actions.
++ *
++ * Drawn as the `Overlay::OverlayEclipseUi` overlay, so it works in every
++ * renderer and every stream window. Enabled with `ECLIPSE_STREAM_UI=1`;
++ * Eclipse can flip it live with `stream-ui 0|1`. The logo position comes from
++ * `ECLIPSE_UI_POS=fx,fy` (0..1 of the free space) and is reported back with
++ * `ui-pos fx fy` after a drag.
++ */
++
++/**
++ * @brief Read env and show the logo if enabled (SDL main thread).
++ */
++void eclipseStreamUiStart();
++
++/**
++ * @brief Hide the logo and menu (SDL main thread).
++ */
++void eclipseStreamUiStop();
++
++/**
++ * @brief Ask the main loop to push the logo again (renderer reset, resize).
++ *
++ * Thread-safe.
++ */
++void eclipseStreamUiNeedsRefresh();
++
++/**
++ * @brief Turn mouse-assisted controls on or off (from the UI listener thread).
++ *
++ * Thread-safe; applied on the next eclipseStreamUiPoll().
++ */
++void eclipseStreamUiSetEnabled(bool enabled);
++
++/**
++ * @brief Apply pending changes and keep the overlay in sync (SDL main loop).
++ */
++void eclipseStreamUiPoll();
++
++/**
++ * @brief Handle clicks on the logo or menu.
++ *
++ * @return true when the event must not reach the host.
++ */
++bool eclipseStreamUiHandleButton(const SDL_MouseButtonEvent* event);
++
++/**
++ * @brief Track hover and logo drags.
++ *
++ * @return true when the event must not reach the host (while dragging).
++ */
++bool eclipseStreamUiHandleMotion(const SDL_MouseMotionEvent* event);
 diff --git a/app/streaming/input/input.cpp b/app/streaming/input/input.cpp
 index cec9da49..9a4f1683 100644
 --- a/app/streaming/input/input.cpp
@@ -1422,8 +2741,36 @@ index cec9da49..9a4f1683 100644
          // If we're in relative mode, try to activate SDL's relative mouse mode
          if (m_AbsoluteMouseMode || SDL_SetRelativeMouseMode(SDL_TRUE) < 0) {
              // Relative mouse mode didn't work or was disabled, so we'll just hide the cursor
+diff --git a/app/streaming/input/input.h b/app/streaming/input/input.h
+index 9fabd6b1..5ffece9c 100644
+--- a/app/streaming/input/input.h
++++ b/app/streaming/input/input.h
+@@ -155,6 +155,23 @@ public:
+     static
+     QString getUnmappedGamepads();
+ 
++    // Eclipse: in-stream menu actions; same code paths as the key combos.
++    enum class EclipseAction {
++        Quit,
++        ToggleFullScreen,
++        ToggleStatsOverlay,
++        ToggleMouseMode,
++        PasteText,
++        ToggleSystemKeys,
++    };
++
++    void eclipseRunAction(EclipseAction action);
++
++    bool eclipseAbsoluteMouseMode() const
++    {
++        return m_AbsoluteMouseMode;
++    }
++
+ private:
+     enum KeyCombo {
+         KeyComboQuit,
 diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
-index b195f73b..928e51ac 100644
+index b195f73b..cb015d65 100644
 --- a/app/streaming/input/keyboard.cpp
 +++ b/app/streaming/input/keyboard.cpp
 @@ -1,4 +1,5 @@
@@ -1440,7 +2787,38 @@ index b195f73b..928e51ac 100644
          break;
  
      case KeyComboToggleCursorHide:
-@@ -185,6 +187,51 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+@@ -173,6 +175,30 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
+     }
+ }
+ 
++void SdlInputHandler::eclipseRunAction(EclipseAction action)
++{
++    switch (action) {
++    case EclipseAction::Quit:
++        performSpecialKeyCombo(KeyComboQuit);
++        break;
++    case EclipseAction::ToggleFullScreen:
++        performSpecialKeyCombo(KeyComboToggleFullScreen);
++        break;
++    case EclipseAction::ToggleStatsOverlay:
++        performSpecialKeyCombo(KeyComboToggleStatsOverlay);
++        break;
++    case EclipseAction::ToggleMouseMode:
++        performSpecialKeyCombo(KeyComboToggleMouseMode);
++        break;
++    case EclipseAction::PasteText:
++        performSpecialKeyCombo(KeyComboPasteText);
++        break;
++    case EclipseAction::ToggleSystemKeys:
++        performSpecialKeyCombo(KeyComboToggleKeyboardGrab);
++        break;
++    }
++}
++
+ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+ {
+     short keyCode;
+@@ -185,6 +211,54 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
          return;
      }
  
@@ -1448,6 +2826,9 @@ index b195f73b..928e51ac 100644
 +        return;
 +    }
 +    if (eclipseHandleDisplayHotkey(event)) {
++        return;
++    }
++    if (eclipseHandleHelpHotkey(event)) {
 +        return;
 +    }
 +
@@ -1493,18 +2874,19 @@ index b195f73b..928e51ac 100644
      if ((event->state == SDL_PRESSED) &&
              (event->keysym.mod & KMOD_CTRL) &&
 diff --git a/app/streaming/session.cpp b/app/streaming/session.cpp
-index 40c1e59c..c0312d74 100644
+index 40c1e59c..deff29ad 100644
 --- a/app/streaming/session.cpp
 +++ b/app/streaming/session.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  #include "session.h"
  #include "settings/streamingpreferences.h"
  #include "streaming/streamutils.h"
 +#include "streaming/eclipsepopup.h"
++#include "streaming/eclipsestreamui.h"
  #include "backend/richpresencemanager.h"
  
  #include <Limelight.h>
-@@ -40,6 +41,8 @@
+@@ -40,6 +42,8 @@
  #include <QGuiApplication>
  #include <QCursor>
  #include <QScreen>
@@ -1513,7 +2895,7 @@ index 40c1e59c..c0312d74 100644
  
  #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
  #include <QQuickOpenGLUtils>
-@@ -1365,8 +1368,13 @@ void Session::getWindowDimensions(int& x, int& y,
+@@ -1365,8 +1369,13 @@ void Session::getWindowDimensions(int& x, int& y,
  
      SDL_Rect usableBounds;
      if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
@@ -1529,7 +2911,7 @@ index 40c1e59c..c0312d74 100644
              m_StreamConfig.height <= usableBounds.h) {
              width = m_StreamConfig.width;
              height = m_StreamConfig.height;
-@@ -1504,37 +1512,27 @@ void Session::updateOptimalWindowDisplayMode()
+@@ -1504,37 +1513,27 @@ void Session::updateOptimalWindowDisplayMode()
  
  void Session::toggleFullscreen()
  {
@@ -1575,7 +2957,7 @@ index 40c1e59c..c0312d74 100644
  
      // Input handler might need to start/stop keyboard grab after changing modes
      m_InputHandler->updateKeyboardGrabState();
-@@ -1618,7 +1616,8 @@ bool Session::startConnectionAsync()
+@@ -1618,7 +1617,8 @@ bool Session::startConnectionAsync()
                        m_Preferences->playAudioOnHost,
                        m_InputHandler->getAttachedGamepadMask(),
                        !m_Preferences->multiController,
@@ -1585,7 +2967,7 @@ index 40c1e59c..c0312d74 100644
      } catch (const GfeHttpResponseException& e) {
          emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
          return false;
-@@ -1794,6 +1793,16 @@ void Session::exec()
+@@ -1794,6 +1794,16 @@ void Session::exec()
      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
      QCoreApplication::sendPostedEvents();
  
@@ -1602,7 +2984,7 @@ index 40c1e59c..c0312d74 100644
      int x, y, width, height;
      getWindowDimensions(x, y, width, height);
  
-@@ -1816,6 +1825,11 @@ void Session::exec()
+@@ -1816,6 +1826,11 @@ void Session::exec()
      // We always want a resizable window with High DPI enabled
      Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
  
@@ -1614,7 +2996,7 @@ index 40c1e59c..c0312d74 100644
      // If we're starting in windowed mode and the Moonlight GUI is maximized or
      // minimized, match that with the streaming window.
      if (!m_IsFullScreen && m_QtWindow != nullptr) {
-@@ -1824,7 +1838,8 @@ void Session::exec()
+@@ -1824,7 +1839,8 @@ void Session::exec()
          if (m_QtWindow->windowStates() & Qt::WindowMaximized) {
              defaultWindowFlags |= SDL_WINDOW_MAXIMIZED;
          }
@@ -1624,7 +3006,7 @@ index 40c1e59c..c0312d74 100644
              defaultWindowFlags |= SDL_WINDOW_MINIMIZED;
          }
  #else
-@@ -1840,10 +1855,17 @@ void Session::exec()
+@@ -1840,10 +1856,17 @@ void Session::exec()
  
      // We use only the computer name on macOS to match Apple conventions where the
      // app name is featured in the menu bar and the document name is in the title bar.
@@ -1644,7 +3026,7 @@ index 40c1e59c..c0312d74 100644
  #endif
  
      m_Window = SDL_CreateWindow(windowName.c_str(),
-@@ -1878,7 +1900,7 @@ void Session::exec()
+@@ -1878,7 +1901,7 @@ void Session::exec()
  
      m_InputHandler->setWindow(m_Window);
  
@@ -1653,7 +3035,7 @@ index 40c1e59c..c0312d74 100644
      QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
      svgImage.fill(0);
  
-@@ -1960,6 +1982,13 @@ void Session::exec()
+@@ -1960,6 +1983,13 @@ void Session::exec()
      // Switch to async logging mode when we enter the SDL loop
      StreamUtils::enterAsyncLoggingMode();
  
@@ -1667,7 +3049,7 @@ index 40c1e59c..c0312d74 100644
      // Hijack this thread to be the SDL main thread. We have to do this
      // because we want to suspend all Qt processing until the stream is over.
      SDL_Event event;
-@@ -1976,8 +2005,10 @@ void Session::exec()
+@@ -1976,8 +2006,10 @@ void Session::exec()
          // and other problems.
          if (!SDL_WaitEventTimeout(&event, 1000)) {
              presence.runCallbacks();
@@ -1678,7 +3060,7 @@ index 40c1e59c..c0312d74 100644
  #else
          // We explicitly use SDL_PollEvent() and SDL_Delay() because
          // SDL_WaitEvent() has an internal SDL_Delay(10) inside which
-@@ -1992,6 +2023,7 @@ void Session::exec()
+@@ -1992,6 +2024,7 @@ void Session::exec()
              SDL_Delay(10);
  #endif
              presence.runCallbacks();
@@ -1686,7 +3068,7 @@ index 40c1e59c..c0312d74 100644
              continue;
          }
  #endif
-@@ -2036,6 +2068,17 @@ void Session::exec()
+@@ -2036,6 +2069,17 @@ void Session::exec()
                  m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                      (DualSenseOutputReport *)event.user.data2);
                  break;
@@ -1704,16 +3086,22 @@ index 40c1e59c..c0312d74 100644
              default:
                  SDL_assert(false);
              }
-@@ -2253,12 +2296,21 @@ void Session::exec()
+@@ -2253,12 +2297,27 @@ void Session::exec()
          case SDL_MOUSEBUTTONDOWN:
          case SDL_MOUSEBUTTONUP:
              presence.runCallbacks();
++            if (eclipseStreamUiHandleButton(&event.button)) {
++                break;
++            }
 +            if (eclipseOverlayHandlesMouse(&event.button)) {
 +                break;
 +            }
              m_InputHandler->handleMouseButtonEvent(&event.button);
              break;
          case SDL_MOUSEMOTION:
++            if (eclipseStreamUiHandleMotion(&event.motion)) {
++                break;
++            }
 +            if (eclipseOverlayIsVisible()) {
 +                break;
 +            }
@@ -1726,7 +3114,7 @@ index 40c1e59c..c0312d74 100644
              m_InputHandler->handleMouseWheelEvent(&event.wheel);
              break;
          case SDL_CONTROLLERAXISMOTION:
-@@ -2308,6 +2360,8 @@ void Session::exec()
+@@ -2308,6 +2367,8 @@ void Session::exec()
      }
  
  DispatchDeferredCleanup:
@@ -1736,7 +3124,7 @@ index 40c1e59c..c0312d74 100644
      StreamUtils::exitAsyncLoggingMode();
  
 diff --git a/app/streaming/session.h b/app/streaming/session.h
-index 53ac9e06..7476880e 100644
+index 53ac9e06..4ebd2ab1 100644
 --- a/app/streaming/session.h
 +++ b/app/streaming/session.h
 @@ -96,6 +96,11 @@ class Session : public QObject
@@ -1751,6 +3139,29 @@ index 53ac9e06..7476880e 100644
  
  public:
      explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr);
+@@ -121,6 +126,22 @@ public:
+         return m_OverlayManager;
+     }
+ 
++    // Eclipse: in-stream UI (eclipsestreamui.cpp, eclipsepopup.cpp).
++    SdlInputHandler* eclipseInputHandler()
++    {
++        return m_InputHandler;
++    }
++
++    SDL_Window* eclipseWindow()
++    {
++        return m_Window;
++    }
++
++    StreamingPreferences* eclipsePreferences()
++    {
++        return m_Preferences;
++    }
++
+     void flushWindowEvents();
+ 
+     void setShouldExit(bool quitHostApp = false);
 diff --git a/app/streaming/streamutils.cpp b/app/streaming/streamutils.cpp
 index 9bd32f50..c0185648 100644
 --- a/app/streaming/streamutils.cpp
@@ -1767,18 +3178,208 @@ index 9bd32f50..c0185648 100644
      int dstH = SDL_ceilf((float)dst->w * src->h / src->w);
      int dstW = SDL_ceilf((float)dst->h * src->w / src->h);
  
+diff --git a/app/streaming/video/ffmpeg-renderers/d3d11va.cpp b/app/streaming/video/ffmpeg-renderers/d3d11va.cpp
+index 823ba134..0baf6041 100644
+--- a/app/streaming/video/ffmpeg-renderers/d3d11va.cpp
++++ b/app/streaming/video/ffmpeg-renderers/d3d11va.cpp
+@@ -1173,6 +1173,14 @@ bool D3D11VARenderer::createOverlayVertexBuffer(Overlay::OverlayType type, int w
+         renderRect.x = 0;
+         renderRect.y = m_DisplayHeight - height;
+     }
++    else if (type == Overlay::OverlayEclipseUi) {
++        // Eclipse: anchored anywhere (top-left, Y-down -> Y-up)
++        int x, y;
++        Session::get()->getOverlayManager().getOverlayTopLeft(type, (int)m_DisplayWidth, (int)m_DisplayHeight,
++                                                        (int)width, (int)height, &x, &y);
++        renderRect.x = (float)x;
++        renderRect.y = (float)m_DisplayHeight - height - y;
++    }
+ 
+     renderRect.w = width;
+     renderRect.h = height;
+diff --git a/app/streaming/video/ffmpeg-renderers/drm.cpp b/app/streaming/video/ffmpeg-renderers/drm.cpp
+index 50d7a395..3a15b4b1 100644
+--- a/app/streaming/video/ffmpeg-renderers/drm.cpp
++++ b/app/streaming/video/ffmpeg-renderers/drm.cpp
+@@ -1573,6 +1573,12 @@ void DrmRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
+             overlayRect.x = 0;
+             overlayRect.y = 0;
+         }
++        else if (type == Overlay::OverlayEclipseUi) {
++            // Eclipse: anchored anywhere
++            Session::get()->getOverlayManager().getOverlayTopLeft(type, m_OutputRect.w, m_OutputRect.h,
++                                                            newSurface->w, newSurface->h,
++                                                            &overlayRect.x, &overlayRect.y);
++        }
+ 
+         overlayRect.w = newSurface->w;
+         overlayRect.h = newSurface->h;
+diff --git a/app/streaming/video/ffmpeg-renderers/dxva2.cpp b/app/streaming/video/ffmpeg-renderers/dxva2.cpp
+index e4386157..18543b6e 100644
+--- a/app/streaming/video/ffmpeg-renderers/dxva2.cpp
++++ b/app/streaming/video/ffmpeg-renderers/dxva2.cpp
+@@ -668,6 +668,14 @@ void DXVA2Renderer::notifyOverlayUpdated(Overlay::OverlayType type)
+         renderRect.x = 0;
+         renderRect.y = 0;
+     }
++    else if (type == Overlay::OverlayEclipseUi) {
++        // Eclipse: anchored anywhere
++        int x, y;
++        Session::get()->getOverlayManager().getOverlayTopLeft(type, (int)m_DisplayWidth, (int)m_DisplayHeight,
++                                                        newSurface->w, newSurface->h, &x, &y);
++        renderRect.x = (float)x;
++        renderRect.y = (float)y;
++    }
+ 
+     renderRect.w = newSurface->w;
+     renderRect.h = newSurface->h;
+diff --git a/app/streaming/video/ffmpeg-renderers/eglvid.cpp b/app/streaming/video/ffmpeg-renderers/eglvid.cpp
+index e5090b6e..1bc16f51 100644
+--- a/app/streaming/video/ffmpeg-renderers/eglvid.cpp
++++ b/app/streaming/video/ffmpeg-renderers/eglvid.cpp
+@@ -213,6 +213,14 @@ void EGLRenderer::renderOverlay(Overlay::OverlayType type, int viewportWidth, in
+             // Top left
+             overlayRect.x = 0;
+             overlayRect.y = viewportHeight - newSurface->h;
++        }
++        else if (type == Overlay::OverlayEclipseUi) {
++            // Eclipse: anchored anywhere (top-left, Y-down -> GL Y-up)
++            int x, y;
++            Session::get()->getOverlayManager().getOverlayTopLeft(type, viewportWidth, viewportHeight,
++                                                            newSurface->w, newSurface->h, &x, &y);
++            overlayRect.x = x;
++            overlayRect.y = viewportHeight - newSurface->h - y;
+         } else {
+             SDL_assert(false);
+         }
+diff --git a/app/streaming/video/ffmpeg-renderers/plvk.cpp b/app/streaming/video/ffmpeg-renderers/plvk.cpp
+index 3a7b2a10..1874cdb0 100644
+--- a/app/streaming/video/ffmpeg-renderers/plvk.cpp
++++ b/app/streaming/video/ffmpeg-renderers/plvk.cpp
+@@ -1038,6 +1038,16 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
+                 overlayParts[i].dst.x0 = 0;
+                 overlayParts[i].dst.y0 = 0;
+             }
++            else if (i == Overlay::OverlayEclipseUi) {
++                // Eclipse: anchored anywhere
++                int x, y;
++                Session::get()->getOverlayManager().getOverlayTopLeft((Overlay::OverlayType)i,
++                                                                (int)targetFrame.crop.x1, (int)targetFrame.crop.y1,
++                                                                (int)overlayParts[i].src.x1, (int)overlayParts[i].src.y1,
++                                                                &x, &y);
++                overlayParts[i].dst.x0 = x;
++                overlayParts[i].dst.y0 = y;
++            }
+             overlayParts[i].dst.x1 = overlayParts[i].dst.x0 + overlayParts[i].src.x1;
+             overlayParts[i].dst.y1 = overlayParts[i].dst.y0 + overlayParts[i].src.y1;
+ 
+diff --git a/app/streaming/video/ffmpeg-renderers/sdlvid.cpp b/app/streaming/video/ffmpeg-renderers/sdlvid.cpp
+index 1faf3c45..747f5d59 100644
+--- a/app/streaming/video/ffmpeg-renderers/sdlvid.cpp
++++ b/app/streaming/video/ffmpeg-renderers/sdlvid.cpp
+@@ -246,6 +246,14 @@ void SdlRenderer::renderOverlay(Overlay::OverlayType type)
+                 m_OverlayRects[type].x = 0;
+                 m_OverlayRects[type].y = 0;
+             }
++            else if (type == Overlay::OverlayEclipseUi) {
++                // Eclipse: anchored anywhere
++                SDL_Rect viewportRect;
++                SDL_RenderGetViewport(m_Renderer, &viewportRect);
++                Session::get()->getOverlayManager().getOverlayTopLeft(type, viewportRect.w, viewportRect.h,
++                                                                newSurface->w, newSurface->h,
++                                                                &m_OverlayRects[type].x, &m_OverlayRects[type].y);
++            }
+ 
+             m_OverlayRects[type].w = newSurface->w;
+             m_OverlayRects[type].h = newSurface->h;
+diff --git a/app/streaming/video/ffmpeg-renderers/vaapi.cpp b/app/streaming/video/ffmpeg-renderers/vaapi.cpp
+index 6142e79e..e5d395cc 100644
+--- a/app/streaming/video/ffmpeg-renderers/vaapi.cpp
++++ b/app/streaming/video/ffmpeg-renderers/vaapi.cpp
+@@ -853,6 +853,14 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
+ 
+             SDL_Rect overlayRect = m_OverlayRect[type];
+ 
++            if (type == Overlay::OverlayEclipseUi) {
++                // Eclipse: anchored anywhere, resolved against the live window size
++                Session::get()->getOverlayManager().getOverlayTopLeft((Overlay::OverlayType)type,
++                                                                windowWidth, windowHeight,
++                                                                overlayRect.w, overlayRect.h,
++                                                                &overlayRect.x, &overlayRect.y);
++            }
++
+             // Negative values are relative to the other side of the window
+             if (overlayRect.x < 0) {
+                 overlayRect.x += windowWidth;
+diff --git a/app/streaming/video/ffmpeg-renderers/vdpau.cpp b/app/streaming/video/ffmpeg-renderers/vdpau.cpp
+index dc0522e8..27facbdd 100644
+--- a/app/streaming/video/ffmpeg-renderers/vdpau.cpp
++++ b/app/streaming/video/ffmpeg-renderers/vdpau.cpp
+@@ -447,6 +447,14 @@ void VDPAURenderer::notifyOverlayUpdated(Overlay::OverlayType type)
+             overlayRect.x0 = 0;
+             overlayRect.y0 = 0;
+         }
++        else if (type == Overlay::OverlayEclipseUi) {
++            // Eclipse: anchored anywhere
++            int x, y;
++            Session::get()->getOverlayManager().getOverlayTopLeft(type, (int)m_DisplayWidth, (int)m_DisplayHeight,
++                                                            newSurface->w, newSurface->h, &x, &y);
++            overlayRect.x0 = (uint32_t)x;
++            overlayRect.y0 = (uint32_t)y;
++        }
+ 
+         overlayRect.x1 = overlayRect.x0 + newSurface->w;
+         overlayRect.y1 = overlayRect.y0 + newSurface->h;
+diff --git a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
+index c7d03ed1..1d3c342e 100644
+--- a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
++++ b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
+@@ -436,6 +436,11 @@ public:
+ 
+     virtual void notifyOverlayUpdated(Overlay::OverlayType type) override
+     {
++        // Eclipse UI is surface-only; this renderer draws overlays as NSTextFields.
++        if (type == Overlay::OverlayEclipseUi) {
++            return;
++        }
++
+         // We must do the actual UI updates on the main thread, so queue an
+         // async callback on the main thread via GCD to do the UI update.
+         dispatch_async(dispatch_get_main_queue(), m_OverlayUpdateBlocks[type]);
+diff --git a/app/streaming/video/ffmpeg-renderers/vt_metal.mm b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
+index 2852d437..a1db6bfe 100644
+--- a/app/streaming/video/ffmpeg-renderers/vt_metal.mm
++++ b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
+@@ -538,6 +538,16 @@ public:
+                     renderRect.x = 0;
+                     renderRect.y = m_LastDrawableHeight - overlayTexture.height;
+                 }
++                else if (i == Overlay::OverlayEclipseUi) {
++                    // Eclipse: anchored anywhere (top-left, Y-down -> Y-up)
++                    int x, y;
++                    Session::get()->getOverlayManager().getOverlayTopLeft((Overlay::OverlayType)i,
++                                                                    (int)m_LastDrawableWidth, (int)m_LastDrawableHeight,
++                                                                    (int)overlayTexture.width, (int)overlayTexture.height,
++                                                                    &x, &y);
++                    renderRect.x = x;
++                    renderRect.y = m_LastDrawableHeight - overlayTexture.height - y;
++                }
+ 
+                 renderRect.w = overlayTexture.width;
+                 renderRect.h = overlayTexture.height;
 diff --git a/app/streaming/video/overlaymanager.cpp b/app/streaming/video/overlaymanager.cpp
-index ab1da16c..04babc98 100644
+index ab1da16c..1acba2fb 100644
 --- a/app/streaming/video/overlaymanager.cpp
 +++ b/app/streaming/video/overlaymanager.cpp
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  #include "overlaymanager.h"
  #include "path.h"
 +#include "streaming/eclipsepopup.h"
++#include "streaming/eclipsestreamui.h"
  
  using namespace Overlay;
  
-@@ -106,6 +107,26 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
+@@ -106,6 +108,41 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
      }
  }
  
@@ -1802,19 +3403,50 @@ index ab1da16c..04babc98 100644
 +    }
 +}
 +
++void OverlayManager::setOverlayAnchor(OverlayType type, float fx, float fy)
++{
++    m_Overlays[type].anchorX = SDL_clamp(fx, 0.0f, 1.0f);
++    m_Overlays[type].anchorY = SDL_clamp(fy, 0.0f, 1.0f);
++}
++
++void OverlayManager::getOverlayTopLeft(OverlayType type, int viewportWidth, int viewportHeight,
++                                       int overlayWidth, int overlayHeight, int* x, int* y)
++{
++    const int freeW = SDL_max(0, viewportWidth - overlayWidth);
++    const int freeH = SDL_max(0, viewportHeight - overlayHeight);
++    *x = (int)(m_Overlays[type].anchorX * freeW + 0.5f);
++    *y = (int)(m_Overlays[type].anchorY * freeH + 0.5f);
++}
++
  SDL_Color OverlayManager::getOverlayColor(OverlayType type)
  {
      return m_Overlays[type].color;
-@@ -122,6 +143,24 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
+@@ -114,6 +151,11 @@ SDL_Color OverlayManager::getOverlayColor(OverlayType type)
+ void OverlayManager::setOverlayRenderer(IOverlayRenderer* renderer)
+ {
+     m_Renderer = renderer;
++    if (renderer != nullptr) {
++        // A new renderer starts with no overlay textures; the persistent
++        // Eclipse logo must be pushed again (done on the SDL main loop).
++        eclipseStreamUiNeedsRefresh();
++    }
+ }
+ 
+ void OverlayManager::notifyOverlayUpdated(OverlayType type)
+@@ -122,6 +164,28 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
          return;
      }
  
 +    // Eclipse: draw stats and status alerts as Eclipse cards so every in-stream
 +    // overlay matches the app (navy, JetBrains Mono, gold info / red alerts).
 +    // Falls through to Moonlight's outlined text if the card can't render.
++    if (type == OverlayType::OverlayEclipseUi) {
++        // Surface-only (setOverlaySurface); nothing to render from text.
++        return;
++    }
 +    if (m_Overlays[type].enabled) {
 +        SDL_Surface* card = type == OverlayType::OverlayDebug
-+            ? eclipseRenderTextCard(m_Overlays[type].text, EclipseCardTone::Info, "CONNECTION STATS")
++            ? eclipseRenderStatsCard(m_Overlays[type].text)
 +            : eclipseRenderTextCard(m_Overlays[type].text, EclipseCardTone::Alert, nullptr);
 +        if (card != nullptr) {
 +            SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
@@ -1831,10 +3463,19 @@ index ab1da16c..04babc98 100644
      if (m_Overlays[type].font == nullptr) {
          if (m_FontData.isEmpty()) {
 diff --git a/app/streaming/video/overlaymanager.h b/app/streaming/video/overlaymanager.h
-index 8f8a60b3..e0902f83 100644
+index 8f8a60b3..9cc593b3 100644
 --- a/app/streaming/video/overlaymanager.h
 +++ b/app/streaming/video/overlaymanager.h
-@@ -33,6 +33,9 @@ public:
+@@ -10,6 +10,8 @@ namespace Overlay {
+ enum OverlayType {
+     OverlayDebug,
+     OverlayStatusUpdate,
++    // Eclipse: draggable logo + menu. Surface-only, placed by anchor (below).
++    OverlayEclipseUi,
+     OverlayMax
+ };
+ 
+@@ -33,10 +35,22 @@ public:
      int getOverlayMaxTextLength();
      void setOverlayTextUpdated(OverlayType type);
      void setOverlayState(OverlayType type, bool enabled);
@@ -1844,3 +3485,25 @@ index 8f8a60b3..e0902f83 100644
      SDL_Color getOverlayColor(OverlayType type);
      int getOverlayFontSize(OverlayType type);
      SDL_Surface* getUpdatedOverlaySurface(OverlayType type);
+ 
++    // Eclipse: place an overlay anywhere. fx/fy are 0..1 fractions of the free
++    // space (viewport minus overlay size), so the overlay stays fully on screen
++    // at any viewport size or DPI. Renderers call getOverlayTopLeft() with
++    // their own viewport size and convert the top-left, Y-down result to their
++    // coordinate system.
++    void setOverlayAnchor(OverlayType type, float fx, float fy);
++    void getOverlayTopLeft(OverlayType type, int viewportWidth, int viewportHeight,
++                           int overlayWidth, int overlayHeight, int* x, int* y);
++
+     void setOverlayRenderer(IOverlayRenderer* renderer);
+ 
+ private:
+@@ -51,6 +65,8 @@ private:
+ 
+         TTF_Font* font;
+         SDL_Surface* surface;
++        float anchorX;
++        float anchorY;
+     } m_Overlays[OverlayMax];
+     IOverlayRenderer* m_Renderer;
+     QByteArray m_FontData;

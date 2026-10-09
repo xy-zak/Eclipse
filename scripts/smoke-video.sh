@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRANSCRIPT="${TMPDIR:-/tmp}/eclipse-video-smoke.log"
 UI_PORT=47990
 RTSP_PORT=48010
+# 0 = stream until the Moonlight window is closed.
 STREAM_SECS="${ECLIPSE_VIDEO_SMOKE_SECS:-10}"
 RESOLUTION="${ECLIPSE_SMOKE_RESOLUTION:-1920x1080}"
 PAIR_GRACE=0.4
@@ -46,6 +47,11 @@ Usage:
   ./scripts/smoke-video.sh host
   ./scripts/smoke-video.sh client <ip>
   ./scripts/smoke-video.sh loopback
+
+Env:
+  ECLIPSE_VIDEO_SMOKE_SECS=N   stream for N seconds (default 10); 0 = until you
+                               close the Moonlight window (Ctrl+Alt+Q)
+  ECLIPSE_STREAM_UI=0|1        hide/show the in-stream Eclipse logo menu (default 1)
 EOF
 }
 
@@ -361,14 +367,23 @@ run_client() {
   moon_log="${TMPDIR:-/tmp}/eclipse-moonlight-smoke.log"
   : > "${moon_log}"
   started="$(date +%s)"
-  log "Streaming to ${ip} for ${STREAM_SECS}s (windowed ${RESOLUTION} H.264)"
-  moonlight_cmd stream \
+  if [[ "${STREAM_SECS}" -eq 0 ]]; then
+    log "Streaming to ${ip} until you close the Moonlight window (windowed ${RESOLUTION} H.264)"
+  else
+    log "Streaming to ${ip} for ${STREAM_SECS}s (windowed ${RESOLUTION} H.264)"
+  fi
+  # Show the Eclipse logo menu like Eclipse does (ECLIPSE_STREAM_UI=0 to hide).
+  ECLIPSE_STREAM_UI="${ECLIPSE_STREAM_UI:-1}" moonlight_cmd stream \
     --resolution "${RESOLUTION}" --video-codec H.264 --no-hdr --packet-size 1024 \
     --display-mode windowed \
     "${ip}" Desktop >>"${moon_log}" 2>&1 &
   moon_pid=$!
-  for t in $(seq 1 "${STREAM_SECS}"); do
+  t=0
+  while [[ "${STREAM_SECS}" -eq 0 || "${t}" -lt "${STREAM_SECS}" ]]; do
     sleep 1
+    t=$((t + 1))
+    # Window closed (Ctrl+Alt+Q / Esc chord): stop waiting.
+    kill -0 "${moon_pid}" 2>/dev/null || break
     if grep -qiE 'has not been paired|Incorrect PIN|No video received|Failed to initialise video capture|error 503' "${moon_log}" 2>/dev/null; then
       stop_pid "${moon_pid}"
       fail_if_moon_log "${moon_log}"
@@ -389,7 +404,7 @@ run_client() {
     127.0.0.1|localhost|::1)
       new+=$'\n'"$(service_log_since "${started}")"
       grep -q "CLIENT CONNECTED" <<<"${new}" || \
-        die "Loopback stream ran ${STREAM_SECS}s but Sunshine never logged CLIENT CONNECTED."
+        die "Loopback stream ran ${t}s but Sunshine never logged CLIENT CONNECTED."
       if host_audio_issue "${new}"; then
         grep -E "Unable to initialize audio capture|Couldn't connect to pulseaudio|pa_simple_new|Eclipse: " <<<"${new}" \
           | tail -n 10 | tee -a "${TRANSCRIPT}" || true
@@ -398,7 +413,7 @@ run_client() {
       log "OK host audio: capture initialized"
       ;;
   esac
-  log "OK client: Moonlight ran ${STREAM_SECS}s without a no-video error"
+  log "OK client: Moonlight ran ${t}s without a no-video error"
 }
 
 # --- main ---

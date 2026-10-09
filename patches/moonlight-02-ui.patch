@@ -3,26 +3,28 @@ Why: Eclipse connecting splash, dialogs/toasts, moon icon, Remboy/JetBrains, qrc
 Depends-on: vendor/PINS moonlight-qt; moonlight-01-behavior.patch
 
 diff --git a/app/app.pro b/app/app.pro
-index 1c0661b3..0877ce21 100644
+index 1c0661b3..7a15a015 100644
 --- a/app/app.pro
 +++ b/app/app.pro
-@@ -192,6 +192,7 @@ SOURCES += \
+@@ -192,6 +192,8 @@ SOURCES += \
      streaming/input/mouse.cpp \
      streaming/input/reltouch.cpp \
      streaming/session.cpp \
 +    streaming/eclipsepopup.cpp \
++    streaming/eclipsestreamui.cpp \
      streaming/audio/audio.cpp \
      streaming/audio/renderers/sdlaud.cpp \
      gui/computermodel.cpp \
-@@ -229,6 +230,7 @@ HEADERS += \
+@@ -229,6 +231,8 @@ HEADERS += \
      settings/streamingpreferences.h \
      streaming/input/input.h \
      streaming/session.h \
 +    streaming/eclipsepopup.h \
++    streaming/eclipsestreamui.h \
      streaming/audio/renderers/renderer.h \
      streaming/audio/renderers/sdl.h \
      gui/computermodel.h \
-@@ -546,9 +548,9 @@ unix:!macx: {
+@@ -546,9 +550,9 @@ unix:!macx: {
  }
  win32 {
      RC_ICONS = moonlight.ico

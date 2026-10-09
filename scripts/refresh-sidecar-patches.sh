@@ -21,9 +21,22 @@ MOONLIGHT_BEHAVIOR=(
   app/settings/streamingpreferences.h
   app/streaming/eclipsepopup.cpp
   app/streaming/eclipsepopup.h
+  app/streaming/eclipsestreamui.cpp
+  app/streaming/eclipsestreamui.h
   app/streaming/audio/audio.cpp
   app/streaming/input/input.cpp
+  app/streaming/input/input.h
   app/streaming/input/keyboard.cpp
+  app/streaming/video/ffmpeg-renderers/d3d11va.cpp
+  app/streaming/video/ffmpeg-renderers/drm.cpp
+  app/streaming/video/ffmpeg-renderers/dxva2.cpp
+  app/streaming/video/ffmpeg-renderers/eglvid.cpp
+  app/streaming/video/ffmpeg-renderers/plvk.cpp
+  app/streaming/video/ffmpeg-renderers/sdlvid.cpp
+  app/streaming/video/ffmpeg-renderers/vaapi.cpp
+  app/streaming/video/ffmpeg-renderers/vdpau.cpp
+  app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
+  app/streaming/video/ffmpeg-renderers/vt_metal.mm
   app/streaming/session.cpp
   app/streaming/session.h
   app/streaming/streamutils.cpp

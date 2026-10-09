@@ -33,6 +33,8 @@ const DEFAULT_PREFS: StreamPrefs = {
   audioOnHost: false,
   audioChannels: "stereo",
   yuv444: false,
+  streamUi: true,
+  uiPos: [970, 30],
 };
 
 function formatMbps(mbps: number | null): string {
@@ -71,6 +73,8 @@ function prefsFromSession(session: SessionStatus | null): StreamPrefs {
     audioOnHost: Boolean(session.audioOnHost),
     audioChannels: session.audioChannels || DEFAULT_PREFS.audioChannels,
     yuv444: Boolean(session.yuv444),
+    streamUi: session.streamUi ?? DEFAULT_PREFS.streamUi,
+    uiPos: session.uiPos ?? DEFAULT_PREFS.uiPos,
   };
 }
 
@@ -382,6 +386,8 @@ export default function App() {
               <MoonlightPopover
                 moonlightPresent={Boolean(status?.moonlightPresent)}
                 moonlightActive={Boolean(session?.connected)}
+                prefs={prefs}
+                onChange={setPrefs}
               />
               <SunshinePopover
                 sunshinePresent={Boolean(status?.sunshinePresent)}

@@ -205,6 +205,7 @@ enum ControlCmd {
     ShowDisplays,
     RegisterUi { port: u16, pid: u32 },
     SwitchDisplay { index: usize, pid: Option<u32> },
+    UiPos { pos: [u16; 2] },
     Ignore,
 }
 
@@ -228,6 +229,15 @@ fn parse_control_line(cmd: &str) -> ControlCmd {
             return ControlCmd::Ignore;
         };
         return ControlCmd::RegisterUi { port, pid };
+    }
+    if let Some(rest) = cmd.strip_prefix("ui-pos ") {
+        let mut parts = rest.split_whitespace();
+        let x = parts.next().and_then(parse_ui_fraction);
+        let y = parts.next().and_then(parse_ui_fraction);
+        return match (x, y) {
+            (Some(x), Some(y)) => ControlCmd::UiPos { pos: [x, y] },
+            _ => ControlCmd::Ignore,
+        };
     }
     if let Some(rest) = cmd.strip_prefix("switch-display ") {
         let mut parts = rest.split_whitespace();
@@ -272,6 +282,12 @@ pub struct StreamPrefs {
     pub audio_channels: String,
     #[serde(default)]
     pub yuv444: bool,
+    /// Mouse-assisted controls: the draggable Eclipse logo + menu in streams.
+    #[serde(default = "default_stream_ui")]
+    pub stream_ui: bool,
+    /// Logo position as per-mille (0..=1000) fractions of the free space.
+    #[serde(default = "default_ui_pos")]
+    pub ui_pos: [u16; 2],
 }
 
 const FPS_CHOICES: [u32; 5] = [30, 60, 90, 120, 144];
@@ -287,6 +303,26 @@ fn default_audio_channels() -> String {
     "stereo".into()
 }
 
+fn default_stream_ui() -> bool {
+    true
+}
+
+fn default_ui_pos() -> [u16; 2] {
+    [970, 30]
+}
+
+/// `ECLIPSE_UI_POS` / `ui-pos` wire format: "0.970,0.030" style fractions.
+fn ui_pos_env(pos: [u16; 2]) -> String {
+    format!("{:.3},{:.3}", f32::from(pos[0]) / 1000.0, f32::from(pos[1]) / 1000.0)
+}
+
+fn parse_ui_fraction(text: &str) -> Option<u16> {
+    let value = text.trim().parse::<f32>().ok()?;
+    value
+        .is_finite()
+        .then(|| (value.clamp(0.0, 1.0) * 1000.0).round() as u16)
+}
+
 impl Default for StreamPrefs {
     fn default() -> Self {
         Self {
@@ -300,6 +336,8 @@ impl Default for StreamPrefs {
             audio_on_host: false,
             audio_channels: default_audio_channels(),
             yuv444: false,
+            stream_ui: default_stream_ui(),
+            ui_pos: default_ui_pos(),
         }
     }
 }
@@ -322,6 +360,9 @@ fn validate_prefs(prefs: StreamPrefs) -> Result<StreamPrefs, String> {
     }
     if !AUDIO_CHANNELS.contains(&prefs.audio_channels.as_str()) {
         return Err("Audio must be Stereo, 5.1, or 7.1.".into());
+    }
+    if prefs.ui_pos.iter().any(|v| *v > 1000) {
+        return Err("Stream controls position is out of range.".into());
     }
     Ok(prefs)
 }
@@ -355,6 +396,8 @@ pub struct SessionStatus {
     pub audio_on_host: bool,
     pub audio_channels: String,
     pub yuv444: bool,
+    pub stream_ui: bool,
+    pub ui_pos: [u16; 2],
     pub displays: Vec<StreamWindowStatus>,
     pub scale_options: Vec<ScaleOption>,
 }
@@ -563,6 +606,8 @@ impl SessionInner {
             audio_on_host: prefs.audio_on_host,
             audio_channels: prefs.audio_channels,
             yuv444: prefs.yuv444,
+            stream_ui: prefs.stream_ui,
+            ui_pos: prefs.ui_pos,
             displays,
             scale_options: options,
         }
@@ -582,12 +627,16 @@ impl SessionInner {
             || old.audio_channels != prefs.audio_channels
             || old.yuv444 != prefs.yuv444;
         let hotkey_changed = old.hotkey_shift != prefs.hotkey_shift;
+        let stream_ui_changed = old.stream_ui != prefs.stream_ui;
         *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = prefs.clone();
         save_prefs(&prefs);
         self.lock_host().set_hotkey_shift(prefs.hotkey_shift);
         if hotkey_changed {
             self.broadcast_hotkey_shift(prefs.hotkey_shift);
             let _ = self.broadcast_display_map();
+        }
+        if stream_ui_changed {
+            self.broadcast(if prefs.stream_ui { "stream-ui 1" } else { "stream-ui 0" });
         }
         if !stream_changed {
             return Ok(());
@@ -817,15 +866,16 @@ impl SessionInner {
         if !display_map.is_empty() {
             env.push(("ECLIPSE_DISPLAY_MAP", display_map.clone()));
         }
-        let shift = self
-            .prefs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .hotkey_shift;
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
         env.push((
             "ECLIPSE_HOTKEY_SHIFT",
-            if shift { "1".into() } else { "0".into() },
+            if prefs.hotkey_shift { "1".into() } else { "0".into() },
         ));
+        env.push((
+            "ECLIPSE_STREAM_UI",
+            if prefs.stream_ui { "1".into() } else { "0".into() },
+        ));
+        env.push(("ECLIPSE_UI_POS", ui_pos_env(prefs.ui_pos)));
         (display_map, env)
     }
 
@@ -857,6 +907,28 @@ impl SessionInner {
         drop(windows);
         if promote {
             push_display_map(port, "audio 1");
+        }
+    }
+
+    fn broadcast(&self, body: &str) {
+        let ports: Vec<u16> = self
+            .windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|w| w.ui_port)
+            .collect();
+        for port in ports {
+            push_display_map(port, body);
+        }
+    }
+
+    /// Moonlight reports the logo position after a drag; new windows reuse it.
+    fn set_ui_pos(&self, pos: [u16; 2]) {
+        let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        if prefs.ui_pos != pos {
+            prefs.ui_pos = pos;
+            save_prefs(&prefs);
         }
     }
 
@@ -1031,6 +1103,10 @@ fn start_control_listener(inner: Arc<SessionInner>) {
                         "err".into()
                     }
                 }
+                ControlCmd::UiPos { pos } => {
+                    inner.set_ui_pos(pos);
+                    "ok".into()
+                }
                 ControlCmd::Ignore => "ok".into(),
             };
             let _ = write!(stream, "{reply}");
@@ -1120,6 +1196,20 @@ fn load_prefs() -> StreamPrefs {
     if let Some(yuv444) = value.get("yuv444").and_then(|d| d.as_bool()) {
         prefs.yuv444 = yuv444;
     }
+    if let Some(on) = value.get("streamUi").and_then(|d| d.as_bool()) {
+        prefs.stream_ui = on;
+    }
+    if let Some(pos) = value.get("uiPos").and_then(|d| d.as_array()) {
+        let coords: Vec<u16> = pos
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .filter(|v| *v <= 1000)
+            .map(|v| v as u16)
+            .collect();
+        if let [x, y] = coords[..] {
+            prefs.ui_pos = [x, y];
+        }
+    }
     if let Some(channels) = value
         .get("audioChannels")
         .and_then(|d| d.as_str())
@@ -1147,6 +1237,8 @@ fn save_prefs(prefs: &StreamPrefs) {
         "audioOnHost": prefs.audio_on_host,
         "audioChannels": prefs.audio_channels,
         "yuv444": prefs.yuv444,
+        "streamUi": prefs.stream_ui,
+        "uiPos": prefs.ui_pos,
     });
     let _ = std::fs::write(path, body.to_string());
 }
@@ -1299,6 +1391,18 @@ mod tests {
     }
 
     #[test]
+    fn stream_ui_env_and_position_round_trip() {
+        assert_eq!(ui_pos_env(default_ui_pos()), "0.970,0.030");
+        assert_eq!(ui_pos_env([0, 1000]), "0.000,1.000");
+        let bad = StreamPrefs {
+            ui_pos: [1001, 0],
+            ..StreamPrefs::default()
+        };
+        assert!(validate_prefs(bad).is_err());
+        assert!(StreamPrefs::default().stream_ui);
+    }
+
+    #[test]
     fn yuv444_flag_is_pinned_both_ways() {
         let off = stream_args("100.64.0.1", 1920, 1080, None, &StreamPrefs::default(), "");
         assert!(off.iter().any(|a| a == "--no-yuv444"));
@@ -1417,6 +1521,16 @@ no Qt platform plugin
             }
         );
         assert_eq!(parse_control_line("nope"), ControlCmd::Ignore);
+        assert_eq!(
+            parse_control_line("ui-pos 0.250 0.900"),
+            ControlCmd::UiPos { pos: [250, 900] }
+        );
+        assert_eq!(
+            parse_control_line("ui-pos 1.7 -2"),
+            ControlCmd::UiPos { pos: [1000, 0] }
+        );
+        assert_eq!(parse_control_line("ui-pos 0.5"), ControlCmd::Ignore);
+        assert_eq!(parse_control_line("ui-pos nan 0.1"), ControlCmd::Ignore);
     }
 
     #[cfg(unix)]
