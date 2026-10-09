@@ -5,6 +5,7 @@ import {
   PopoverButton,
   PopoverPanel,
 } from "@headlessui/react";
+import type { HostLockStatus } from "../types";
 import { Button } from "./Button";
 import { DROPDOWN_TRIGGER_OPEN, DROPDOWN_WIDTH } from "./dropdown";
 import { PixelIcon } from "./PixelIcon";
@@ -23,6 +24,9 @@ type Props = {
   onSetHostRunning: (on: boolean) => Promise<void>;
   onSetKeepHostOnExit: (on: boolean) => Promise<void>;
   onSetHostStartOnBoot: (on: boolean) => Promise<void>;
+  hostLock: HostLockStatus | null;
+  onSetHostLockOnEnd: (on: boolean) => Promise<void>;
+  onTestHostLock: () => Promise<void>;
 };
 
 export function SunshinePopover({
@@ -36,11 +40,15 @@ export function SunshinePopover({
   onSetHostRunning,
   onSetKeepHostOnExit,
   onSetHostStartOnBoot,
+  hostLock,
+  onSetHostLockOnEnd,
+  onTestHostLock,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [hostBusy, setHostBusy] = useState(false);
   const [keepBusy, setKeepBusy] = useState(false);
   const [bootBusy, setBootBusy] = useState(false);
+  const [lockBusy, setLockBusy] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
   const copyPassword = () => {
@@ -70,6 +78,16 @@ export function SunshinePopover({
   const setStartOnBoot = (on: boolean) => {
     setBootBusy(true);
     void onSetHostStartOnBoot(on).finally(() => setBootBusy(false));
+  };
+
+  const setLockOnEnd = (on: boolean) => {
+    setLockBusy(true);
+    void onSetHostLockOnEnd(on).finally(() => setLockBusy(false));
+  };
+
+  const testLock = () => {
+    setLockBusy(true);
+    void onTestHostLock().finally(() => setLockBusy(false));
   };
 
   const hostToggleDisabled = hostBusy || !sunshinePresent;
@@ -194,6 +212,46 @@ export function SunshinePopover({
                 {bootBusy ? "Updating…" : "Auto-start hosting on reboot"}
               </button>
             )}
+            {hostLock?.supported ? (
+              <>
+                <p className="mt-3 text-moonlight/70">
+                  Lock this PC when a stream ends, so nobody at this desk sees
+                  your session. It waits a few seconds so switching displays
+                  does not lock, and also covers dropped connections. Needs
+                  Eclipse running in the tray.
+                </p>
+                {hostLock.on ? (
+                  <Button
+                    variant="fail"
+                    className="mt-3 w-full"
+                    disabled={lockBusy}
+                    onClick={() => setLockOnEnd(false)}
+                  >
+                    Stop locking this PC when a stream ends
+                  </Button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={lockBusy}
+                    onClick={() => setLockOnEnd(true)}
+                    className="mt-3 w-full border border-sunshine bg-eclipse px-3 py-1.5 text-sm font-medium text-sunshine hover:border-success hover:bg-success hover:text-eclipse disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Lock this PC when a stream ends
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={lockBusy}
+                  onClick={testLock}
+                  className="mt-2 w-full border border-sunshine bg-eclipse px-3 py-1.5 text-sm font-medium text-sunshine hover:bg-sunshine hover:text-eclipse disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {lockBusy ? "Locking…" : "Test lock now"}
+                </button>
+                {hostLock.lastError ? (
+                  <p className="mt-2 text-fail">{hostLock.lastError}</p>
+                ) : null}
+              </>
+            ) : null}
             <p className="mt-3 text-moonlight/70">
               Host admin is the local Sunshine page at {HOST_ADMIN_URL}. The
               certificate is self-signed; the browser warning is expected.

@@ -143,6 +143,8 @@ In-stream shortcuts use **Ctrl+left Alt** by default (consumed in Moonlight, not
 | Ctrl+Alt+F | Toggle letterboxed fullscreen on this window |
 | Ctrl+Alt+K | Toggle Super / Windows key ownership (client vs host) |
 | Ctrl+Alt+M | Toggle this window between absolute (Desktop) and relative (Game) mouse |
+| Ctrl+Alt+S | Toggle the connection stats overlay |
+| Ctrl+Alt+V | Type the client clipboard as text on the host (`LiSendUtf8TextEvent`) |
 | Ctrl+Alt+- | List host displays and this window’s active display |
 | Ctrl+Alt+1–9 | Retarget this window to host display N |
 | Ctrl+Alt+0 | Open one client window per host display |

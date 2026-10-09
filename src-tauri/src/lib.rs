@@ -2,6 +2,7 @@ mod discovery;
 mod display;
 mod hostconf;
 mod hostinfo;
+mod hostlock;
 mod pairing;
 mod session;
 mod sidecar;
@@ -9,6 +10,7 @@ mod sidecar;
 use std::sync::Mutex;
 
 use discovery::DiscoverySnapshot;
+use hostlock::HostLockStatus;
 use pairing::InboundStream;
 use session::{SessionProcess, SessionStatus, StreamPrefs};
 use sidecar::{HostProcess, SidecarStatus};
@@ -87,6 +89,23 @@ async fn set_host_running(app: tauri::AppHandle, on: bool) -> Result<(), String>
         sync_host_menu(&app, &item);
     }
     Ok(())
+}
+
+#[tauri::command]
+fn host_lock_status() -> HostLockStatus {
+    hostlock::status()
+}
+
+#[tauri::command]
+fn set_host_lock_on_end(on: bool) -> HostLockStatus {
+    hostlock::set_on(on)
+}
+
+#[tauri::command]
+async fn test_host_lock() -> HostLockStatus {
+    tauri::async_runtime::spawn_blocking(hostlock::test_lock)
+        .await
+        .unwrap_or_else(|_| hostlock::status())
 }
 
 #[tauri::command]
@@ -259,6 +278,9 @@ pub fn run() {
             set_host_running,
             set_keep_host_on_exit,
             set_host_start_on_boot,
+            host_lock_status,
+            set_host_lock_on_end,
+            test_host_lock,
             peer_latency,
             set_stream_prefs,
             open_all_displays
@@ -277,6 +299,7 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 handle.state::<HostProcess>().start_sunshine();
             });
+            hostlock::start_watcher();
             setup_tray(app)?;
             if !start_hidden() {
                 show_main_window(app.handle());

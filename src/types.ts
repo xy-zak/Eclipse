@@ -74,6 +74,13 @@ export type StreamPrefs = {
   systemKeys: SystemKeys;
   audioOnHost: boolean;
   audioChannels: AudioChannels;
+  yuv444: boolean;
+};
+
+export type HostLockStatus = {
+  on: boolean;
+  supported: boolean;
+  lastError: string | null;
 };
 
 export type SystemKeys = "never" | "fullscreen" | "always";
@@ -93,6 +100,7 @@ export type SessionStatus = {
   systemKeys: SystemKeys;
   audioOnHost: boolean;
   audioChannels: AudioChannels;
+  yuv444: boolean;
   displays: StreamWindowStatus[];
   scaleOptions: ScaleOption[];
 };

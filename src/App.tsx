@@ -15,6 +15,7 @@ import { TailscalePopover } from "./components/TailscalePopover";
 import { TitleBar } from "./components/TitleBar";
 import type {
   DiscoverySnapshot,
+  HostLockStatus,
   InboundStream,
   SessionStatus,
   SidecarStatus,
@@ -31,6 +32,7 @@ const DEFAULT_PREFS: StreamPrefs = {
   systemKeys: "fullscreen",
   audioOnHost: false,
   audioChannels: "stereo",
+  yuv444: false,
 };
 
 function formatMbps(mbps: number | null): string {
@@ -68,6 +70,7 @@ function prefsFromSession(session: SessionStatus | null): StreamPrefs {
     systemKeys: session.systemKeys || DEFAULT_PREFS.systemKeys,
     audioOnHost: Boolean(session.audioOnHost),
     audioChannels: session.audioChannels || DEFAULT_PREFS.audioChannels,
+    yuv444: Boolean(session.yuv444),
   };
 }
 
@@ -76,6 +79,7 @@ export default function App() {
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [session, setSession] = useState<SessionStatus | null>(null);
   const [inbound, setInbound] = useState<InboundStream | null>(null);
+  const [hostLock, setHostLock] = useState<HostLockStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshPulse, setRefreshPulse] = useState(0);
@@ -138,6 +142,9 @@ export default function App() {
     invoke<InboundStream | null>("inbound_status")
       .then(setInbound)
       .catch(() => setInbound(null));
+    invoke<HostLockStatus>("host_lock_status")
+      .then(setHostLock)
+      .catch(() => {});
     refreshPeers(true);
   }, [refreshPeers]);
 
@@ -155,6 +162,10 @@ export default function App() {
         invoke<InboundStream | null>("inbound_status")
           .then(setInbound)
           .catch(() => setInbound(null)),
+        // Picks up a failed automatic lock (lastError) after a stream ends.
+        invoke<HostLockStatus>("host_lock_status")
+          .then(setHostLock)
+          .catch(() => {}),
       ]).finally(() => {
         statusInFlight.current = false;
       });
@@ -263,6 +274,26 @@ export default function App() {
     }
   };
 
+  const setHostLockOnEnd = async (on: boolean) => {
+    setError(null);
+    try {
+      setHostLock(await invoke<HostLockStatus>("set_host_lock_on_end", { on }));
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
+  };
+
+  const testHostLock = async () => {
+    setError(null);
+    try {
+      setHostLock(await invoke<HostLockStatus>("test_host_lock"));
+    } catch (err: unknown) {
+      setError(String(err));
+      throw err;
+    }
+  };
+
   const copyWebUiPassword = async () => {
     setError(null);
     try {
@@ -363,6 +394,9 @@ export default function App() {
                 onSetHostRunning={setHostRunning}
                 onSetKeepHostOnExit={setKeepHostOnExit}
                 onSetHostStartOnBoot={setHostStartOnBoot}
+                hostLock={hostLock}
+                onSetHostLockOnEnd={setHostLockOnEnd}
+                onTestHostLock={testHostLock}
               />
               <TailscalePopover
                 tailscaleOk={Boolean(discovery?.tailscaleOk)}

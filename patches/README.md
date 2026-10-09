@@ -17,7 +17,7 @@ Glob order is apply order:
 5. `sunshine-session-audio.patch` — root host service connects PulseAudio to the active seat0 user (links `libsystemd`)
 6. `sunshine-sessions.patch` — `GET /api/sessions`, terminate on apps/close
 7. `sunshine-udev-prefix.patch` — CMake udev/systemd install dirs
-8. `moonlight-01-behavior.patch` — stream contract (C++/headers), `ECLIPSE_AUDIO` per-window audio, mouse-mode hints
+8. `moonlight-01-behavior.patch` — stream contract (C++/headers), `ECLIPSE_AUDIO` per-window audio, mouse-mode hints, stats/alert overlays drawn as Eclipse cards
 9. `moonlight-02-ui.patch` — connecting splash, Eclipse dialogs/toasts, moon icon, qrc
 
 Each file starts with `Subject:` / `Why:` / `Depends-on:`.

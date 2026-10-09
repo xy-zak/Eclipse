@@ -390,6 +390,11 @@ pub fn parse_sessions_payload(value: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// Active inbound streams on this machine's Sunshine; None when unreachable.
+pub fn local_session_count() -> Option<usize> {
+    fetch_session_ips(LOCAL_HOST).map(|ips| ips.len())
+}
+
 /// GET `/api/sessions` on this machine's Sunshine. Missing endpoint yields None.
 pub fn fetch_local_session_ip() -> Option<String> {
     fetch_session_ips(LOCAL_HOST)?.into_iter().next()

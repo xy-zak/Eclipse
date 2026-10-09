@@ -59,6 +59,15 @@ pub fn stream_args(
         "--bitrate".into(),
         (prefs.bitrate_mbps * 1000).to_string(),
         "--no-hdr".into(),
+        // 4:4:4 keeps text sharp; Moonlight warns and falls back when the host
+        // encoder or client decoder can't do it.
+        if prefs.yuv444 {
+            "--yuv444".into()
+        } else {
+            "--no-yuv444".into()
+        },
+        // Stats start hidden; Ctrl+Alt+S toggles them per window.
+        "--no-performance-overlay".into(),
         "--packet-size".into(),
         "1024".into(),
         // Desktop mode sends absolute positions, which pin at the window edge.
@@ -261,8 +270,12 @@ pub struct StreamPrefs {
     pub audio_on_host: bool,
     #[serde(default = "default_audio_channels")]
     pub audio_channels: String,
+    #[serde(default)]
+    pub yuv444: bool,
 }
 
+const FPS_CHOICES: [u32; 5] = [30, 60, 90, 120, 144];
+const BITRATE_CHOICES_MBPS: [u32; 5] = [10, 20, 50, 100, 150];
 const SYSTEM_KEYS: [&str; 3] = ["never", "fullscreen", "always"];
 const AUDIO_CHANNELS: [&str; 3] = ["stereo", "5.1-surround", "7.1-surround"];
 
@@ -286,6 +299,7 @@ impl Default for StreamPrefs {
             system_keys: default_system_keys(),
             audio_on_host: false,
             audio_channels: default_audio_channels(),
+            yuv444: false,
         }
     }
 }
@@ -294,14 +308,14 @@ fn validate_prefs(prefs: StreamPrefs) -> Result<StreamPrefs, String> {
     if !matches!(prefs.scale, 0 | 1 | 2 | 4) {
         return Err("Stream scale must be Quarter, Half, or Native.".into());
     }
-    if !matches!(prefs.fps, 30 | 60) {
-        return Err("FPS must be 30 or 60.".into());
+    if !FPS_CHOICES.contains(&prefs.fps) {
+        return Err("FPS must be 30, 60, 90, 120, or 144.".into());
     }
     if !matches!(prefs.codec.as_str(), "H.264" | "HEVC" | "AV1") {
         return Err("Codec must be H.264, HEVC, or AV1.".into());
     }
-    if !matches!(prefs.bitrate_mbps, 10 | 20 | 50) {
-        return Err("Max bandwidth must be 10, 20, or 50 Mb/s.".into());
+    if !BITRATE_CHOICES_MBPS.contains(&prefs.bitrate_mbps) {
+        return Err("Max bandwidth must be 10, 20, 50, 100, or 150 Mb/s.".into());
     }
     if !SYSTEM_KEYS.contains(&prefs.system_keys.as_str()) {
         return Err("System keys must be Off, Fullscreen, or Always.".into());
@@ -340,6 +354,7 @@ pub struct SessionStatus {
     pub system_keys: String,
     pub audio_on_host: bool,
     pub audio_channels: String,
+    pub yuv444: bool,
     pub displays: Vec<StreamWindowStatus>,
     pub scale_options: Vec<ScaleOption>,
 }
@@ -547,6 +562,7 @@ impl SessionInner {
             system_keys: prefs.system_keys,
             audio_on_host: prefs.audio_on_host,
             audio_channels: prefs.audio_channels,
+            yuv444: prefs.yuv444,
             displays,
             scale_options: options,
         }
@@ -563,7 +579,8 @@ impl SessionInner {
             || old.game_mouse != prefs.game_mouse
             || old.system_keys != prefs.system_keys
             || old.audio_on_host != prefs.audio_on_host
-            || old.audio_channels != prefs.audio_channels;
+            || old.audio_channels != prefs.audio_channels
+            || old.yuv444 != prefs.yuv444;
         let hotkey_changed = old.hotkey_shift != prefs.hotkey_shift;
         *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = prefs.clone();
         save_prefs(&prefs);
@@ -1067,7 +1084,7 @@ fn load_prefs() -> StreamPrefs {
         .get("fps")
         .and_then(|d| d.as_u64())
         .map(|n| n as u32)
-        .filter(|n| matches!(*n, 30 | 60))
+        .filter(|n| FPS_CHOICES.contains(n))
     {
         prefs.fps = n;
     }
@@ -1080,7 +1097,7 @@ fn load_prefs() -> StreamPrefs {
         .get("bitrateMbps")
         .and_then(|d| d.as_u64())
         .map(|n| n as u32)
-        .filter(|n| matches!(*n, 10 | 20 | 50))
+        .filter(|n| BITRATE_CHOICES_MBPS.contains(n))
     {
         prefs.bitrate_mbps = n;
     }
@@ -1099,6 +1116,9 @@ fn load_prefs() -> StreamPrefs {
     }
     if let Some(host) = value.get("audioOnHost").and_then(|d| d.as_bool()) {
         prefs.audio_on_host = host;
+    }
+    if let Some(yuv444) = value.get("yuv444").and_then(|d| d.as_bool()) {
+        prefs.yuv444 = yuv444;
     }
     if let Some(channels) = value
         .get("audioChannels")
@@ -1126,6 +1146,7 @@ fn save_prefs(prefs: &StreamPrefs) {
         "systemKeys": prefs.system_keys,
         "audioOnHost": prefs.audio_on_host,
         "audioChannels": prefs.audio_channels,
+        "yuv444": prefs.yuv444,
     });
     let _ = std::fs::write(path, body.to_string());
 }
@@ -1166,6 +1187,8 @@ mod tests {
                 "--bitrate",
                 "20000",
                 "--no-hdr",
+                "--no-yuv444",
+                "--no-performance-overlay",
                 "--packet-size",
                 "1024",
                 "--absolute-mouse",
@@ -1240,6 +1263,52 @@ mod tests {
         };
         assert!(validate_prefs(audio).is_err());
         assert!(validate_prefs(StreamPrefs::default()).is_ok());
+    }
+
+    #[test]
+    fn high_refresh_and_bitrate_tiers_validate() {
+        for fps in FPS_CHOICES {
+            for bitrate_mbps in BITRATE_CHOICES_MBPS {
+                let prefs = StreamPrefs {
+                    fps,
+                    bitrate_mbps,
+                    ..StreamPrefs::default()
+                };
+                assert!(validate_prefs(prefs).is_ok(), "{fps} fps / {bitrate_mbps} Mb/s");
+            }
+        }
+        let odd_fps = StreamPrefs {
+            fps: 75,
+            ..StreamPrefs::default()
+        };
+        assert!(validate_prefs(odd_fps).is_err());
+        let odd_bitrate = StreamPrefs {
+            bitrate_mbps: 30,
+            ..StreamPrefs::default()
+        };
+        assert!(validate_prefs(odd_bitrate).is_err());
+
+        let prefs = StreamPrefs {
+            fps: 120,
+            bitrate_mbps: 150,
+            ..StreamPrefs::default()
+        };
+        let args = stream_args("100.64.0.1", 1920, 1080, None, &prefs, "");
+        assert!(args.windows(2).any(|w| w[0] == "--fps" && w[1] == "120"));
+        assert!(args.windows(2).any(|w| w[0] == "--bitrate" && w[1] == "150000"));
+    }
+
+    #[test]
+    fn yuv444_flag_is_pinned_both_ways() {
+        let off = stream_args("100.64.0.1", 1920, 1080, None, &StreamPrefs::default(), "");
+        assert!(off.iter().any(|a| a == "--no-yuv444"));
+        let prefs = StreamPrefs {
+            yuv444: true,
+            ..StreamPrefs::default()
+        };
+        let on = stream_args("100.64.0.1", 1920, 1080, None, &prefs, "");
+        assert!(on.iter().any(|a| a == "--yuv444"));
+        assert!(!on.iter().any(|a| a == "--no-yuv444"));
     }
 
     #[test]

@@ -13,6 +13,8 @@ const SHORTCUTS: { key: string; action: string }[] = [
   { key: "F", action: "Fullscreen this window" },
   { key: "K", action: "Super / Windows key: client or host" },
   { key: "M", action: "Mouse: Desktop or Game (this window)" },
+  { key: "S", action: "Connection stats overlay" },
+  { key: "V", action: "Type clipboard text on the host" },
   { key: "-", action: "List host displays" },
   { key: "1–9", action: "This window → host display N" },
   { key: "0", action: "One window per host display" },

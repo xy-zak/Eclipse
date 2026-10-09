@@ -418,10 +418,10 @@ index 4668eec9..e73afdb4 100644
  
 diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
 new file mode 100644
-index 00000000..f388af53
+index 00000000..02304401
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.cpp
-@@ -0,0 +1,774 @@
+@@ -0,0 +1,814 @@
 +#include "eclipsepopup.h"
 +#include "streaming/session.h"
 +
@@ -686,6 +686,7 @@ index 00000000..f388af53
 +const SDL_Color kNavy{0x0F, 0x0F, 0x29, 0xFF};
 +const SDL_Color kGold{0xF7, 0xC7, 0x08, 0xFF};
 +const SDL_Color kLavender{0xD9, 0xD9, 0xFC, 0xFF};
++const SDL_Color kFail{0xF0, 0x52, 0x52, 0xFF};
 +
 +SDL_Surface* toArgb8888(SDL_Surface* src)
 +{
@@ -711,13 +712,12 @@ index 00000000..f388af53
 +
 +TTF_Font* openJetBrainsMono(int pixelSize)
 +{
-+    static QByteArray fontData;
-+    if (fontData.isEmpty()) {
++    // Magic static: stats cards render on the decoder thread, map and hint
++    // cards on the SDL main thread.
++    static const QByteArray fontData = [] {
 +        QFile file(QStringLiteral(":/res/eclipse/JetBrainsMono-Regular.ttf"));
-+        if (file.open(QIODevice::ReadOnly)) {
-+            fontData = file.readAll();
-+        }
-+    }
++        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
++    }();
 +    if (fontData.isEmpty() || TTF_WasInit() == 0) {
 +        return nullptr;
 +    }
@@ -733,7 +733,17 @@ index 00000000..f388af53
 +           trimmed == QLatin1String("DESKTOP MOUSE");
 +}
 +
-+SDL_Surface* renderEclipseDisplayCard(const QString& text, SDL_Rect* okOut, bool withOk = true)
++struct CardStyle {
++    SDL_Color frame = kGold;
++    SDL_Color heading = kGold;
++    // Leading lines drawn in the heading colour (besides isHeadingLine()).
++    int headingLines = 0;
++    int wrapW = 480;
++    int minPanelW = 340;
++    int maxPanelW = 520;
++};
++
++SDL_Surface* renderEclipseCard(const QString& text, SDL_Rect* okOut, bool withOk, const CardStyle& style)
 +{
 +    const int fontPx = 14;
 +    const int padX = 20;
@@ -742,9 +752,9 @@ index 00000000..f388af53
 +    const int btnW = 64;
 +    const int btnH = 32;
 +    const int btnGap = 16;
-+    const int wrapW = 480;
-+    const int minPanelW = 340;
-+    const int maxPanelW = 520;
++    const int wrapW = style.wrapW;
++    const int minPanelW = style.minPanelW;
++    const int maxPanelW = style.maxPanelW;
 +
 +    TTF_Font* font = openJetBrainsMono(fontPx);
 +    if (font == nullptr) {
@@ -755,13 +765,15 @@ index 00000000..f388af53
 +    QList<SDL_Surface*> lines;
 +    int textW = 0;
 +    int textH = 0;
++    int lineIndex = 0;
 +    for (const QString& line : text.split(QLatin1Char('\n'))) {
++        const bool heading = lineIndex++ < style.headingLines || isHeadingLine(line);
 +        if (line.isEmpty()) {
 +            lines.append(nullptr);
 +            textH += lineSkip;
 +            continue;
 +        }
-+        const SDL_Color color = isHeadingLine(line) ? kGold : kLavender;
++        const SDL_Color color = heading ? style.heading : kLavender;
 +        const QByteArray utf8 = line.toUtf8();
 +        SDL_Surface* glyph = toArgb8888(
 +            TTF_RenderUTF8_Blended_Wrapped(font, utf8.constData(), color, wrapW));
@@ -787,7 +799,7 @@ index 00000000..f388af53
 +    }
 +
 +    SDL_SetSurfaceBlendMode(card, SDL_BLENDMODE_NONE);
-+    fillRect(card, {0, 0, panelW, panelH}, kGold);
++    fillRect(card, {0, 0, panelW, panelH}, style.frame);
 +    fillRect(card, {1, 1, panelW - 2, panelH - 2}, kNavy);
 +
 +    int y = padTop;
@@ -824,6 +836,11 @@ index 00000000..f388af53
 +        *okOut = okRect;
 +    }
 +    return toArgb8888(card);
++}
++
++SDL_Surface* renderEclipseDisplayCard(const QString& text, SDL_Rect* okOut, bool withOk = true)
++{
++    return renderEclipseCard(text, okOut, withOk, CardStyle{});
 +}
 +
 +// --- Overlay lifetime (SDL surface on OverlayStatusUpdate) ---
@@ -969,6 +986,29 @@ index 00000000..f388af53
 +void eclipseSetHotkeyShift(bool shift)
 +{
 +    applyHotkeyShift(shift);
++}
++
++SDL_Surface* eclipseRenderTextCard(const char* text, EclipseCardTone tone, const char* heading)
++{
++    if (text == nullptr || text[0] == '\0') {
++        return nullptr;
++    }
++    CardStyle style;
++    // Stats lines run ~60 columns; keep them on one line each.
++    style.wrapW = 600;
++    style.maxPanelW = 640;
++    style.minPanelW = 0;
++    if (tone == EclipseCardTone::Alert) {
++        style.frame = kFail;
++        style.heading = kFail;
++    }
++    QString body = QString::fromUtf8(text).trimmed();
++    if (heading != nullptr && heading[0] != '\0') {
++        body = QString::fromUtf8(heading) + QLatin1Char('\n') + body;
++    }
++    // Alerts have no separate title: their first line is the headline.
++    style.headingLines = 1;
++    return renderEclipseCard(body, nullptr, false, style);
 +}
 +
 +bool eclipseAudioEnabled()
@@ -1198,10 +1238,10 @@ index 00000000..f388af53
 +}
 diff --git a/app/streaming/eclipsepopup.h b/app/streaming/eclipsepopup.h
 new file mode 100644
-index 00000000..c88e2b30
+index 00000000..c187dc0f
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,152 @@
 +#pragma once
 +
 +#include "SDL_compat.h"
@@ -1244,6 +1284,25 @@ index 00000000..c88e2b30
 +void eclipseSetHotkeyShift(bool shift);
 +
 +/**
++ * @brief Card tone for in-stream text overlays.
++ *
++ * Info: gold frame and heading (stats). Alert: the app's fail red (connection
++ * warnings), matching the error dialogs.
++ */
++enum class EclipseCardTone { Info, Alert };
++
++/**
++ * @brief Render overlay text as an Eclipse card (navy, JetBrains Mono).
++ *
++ * Safe to call from the decoder thread. The first line (or @p heading, when
++ * given) is drawn in the tone colour.
++ *
++ * @return ARGB8888 surface owned by the caller, or nullptr if the font is
++ *         unavailable (callers fall back to Moonlight's outlined text).
++ */
++SDL_Surface* eclipseRenderTextCard(const char* text, EclipseCardTone tone, const char* heading);
++
++/**
 + * @brief Whether this window plays stream audio.
 + *
 + * `ECLIPSE_AUDIO=0` starts muted (extra display windows); Eclipse can flip it
@@ -1283,7 +1342,7 @@ index 00000000..c88e2b30
 +/**
 + * @brief Consume Ctrl+Alt(+Shift)+0 / - / 1–9 (open-all, overlay, switch-display).
 + *
-+ * Esc, F, K, M, and Q stay in the SDL input handler so they can use
++ * Esc, F, K, M, Q, S, and V stay in the SDL input handler so they can use
 + * `performSpecialKeyCombo`.
 + *
 + * @param event SDL keyboard event.
@@ -1364,7 +1423,7 @@ index cec9da49..9a4f1683 100644
          if (m_AbsoluteMouseMode || SDL_SetRelativeMouseMode(SDL_TRUE) < 0) {
              // Relative mouse mode didn't work or was disabled, so we'll just hide the cursor
 diff --git a/app/streaming/input/keyboard.cpp b/app/streaming/input/keyboard.cpp
-index b195f73b..51328a62 100644
+index b195f73b..928e51ac 100644
 --- a/app/streaming/input/keyboard.cpp
 +++ b/app/streaming/input/keyboard.cpp
 @@ -1,4 +1,5 @@
@@ -1381,7 +1440,7 @@ index b195f73b..51328a62 100644
          break;
  
      case KeyComboToggleCursorHide:
-@@ -185,6 +187,42 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+@@ -185,6 +187,51 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
          return;
      }
  
@@ -1394,7 +1453,7 @@ index b195f73b..51328a62 100644
 +
 +    // Eclipse: Ctrl+Alt shortcuts (Shift is optional via ECLIPSE_HOTKEY_SHIFT).
 +    // Consumed locally so they never reach the host. Display 0/-/1–9 are in
-+    // eclipseHandleDisplayHotkey; Esc/F/K/M/Q need performSpecialKeyCombo.
++    // eclipseHandleDisplayHotkey; Esc/F/K/M/Q/S/V need performSpecialKeyCombo.
 +    if (event->state == SDL_PRESSED && eclipseIsHotkeyChord(event)) {
 +        if (event->keysym.sym == SDLK_ESCAPE) {
 +            eclipseControl("disconnect-all");
@@ -1417,6 +1476,15 @@ index b195f73b..51328a62 100644
 +        }
 +        if (event->keysym.sym == SDLK_q) {
 +            performSpecialKeyCombo(KeyComboQuit);
++            return;
++        }
++        if (event->keysym.sym == SDLK_s) {
++            performSpecialKeyCombo(KeyComboToggleStatsOverlay);
++            return;
++        }
++        if (event->keysym.sym == SDLK_v) {
++            // Types the client clipboard on the host (not a clipboard sync).
++            performSpecialKeyCombo(KeyComboPasteText);
 +            return;
 +        }
 +    }
@@ -1700,10 +1768,17 @@ index 9bd32f50..c0185648 100644
      int dstW = SDL_ceilf((float)dst->h * src->w / src->h);
  
 diff --git a/app/streaming/video/overlaymanager.cpp b/app/streaming/video/overlaymanager.cpp
-index ab1da16c..eb680021 100644
+index ab1da16c..04babc98 100644
 --- a/app/streaming/video/overlaymanager.cpp
 +++ b/app/streaming/video/overlaymanager.cpp
-@@ -106,6 +106,26 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
+@@ -1,5 +1,6 @@
+ #include "overlaymanager.h"
+ #include "path.h"
++#include "streaming/eclipsepopup.h"
+ 
+ using namespace Overlay;
+ 
+@@ -106,6 +107,26 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
      }
  }
  
@@ -1730,6 +1805,31 @@ index ab1da16c..eb680021 100644
  SDL_Color OverlayManager::getOverlayColor(OverlayType type)
  {
      return m_Overlays[type].color;
+@@ -122,6 +143,24 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
+         return;
+     }
+ 
++    // Eclipse: draw stats and status alerts as Eclipse cards so every in-stream
++    // overlay matches the app (navy, JetBrains Mono, gold info / red alerts).
++    // Falls through to Moonlight's outlined text if the card can't render.
++    if (m_Overlays[type].enabled) {
++        SDL_Surface* card = type == OverlayType::OverlayDebug
++            ? eclipseRenderTextCard(m_Overlays[type].text, EclipseCardTone::Info, "CONNECTION STATS")
++            : eclipseRenderTextCard(m_Overlays[type].text, EclipseCardTone::Alert, nullptr);
++        if (card != nullptr) {
++            SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
++                (void**)&m_Overlays[type].surface, card);
++            m_Renderer->notifyOverlayUpdated(type);
++            if (oldSurface != nullptr) {
++                SDL_FreeSurface(oldSurface);
++            }
++            return;
++        }
++    }
++
+     // Construct the required font to render the overlay
+     if (m_Overlays[type].font == nullptr) {
+         if (m_FontData.isEmpty()) {
 diff --git a/app/streaming/video/overlaymanager.h b/app/streaming/video/overlaymanager.h
 index 8f8a60b3..e0902f83 100644
 --- a/app/streaming/video/overlaymanager.h

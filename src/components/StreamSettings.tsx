@@ -109,27 +109,61 @@ export function StreamSettings({ prefs, disabled, onChange }: Props) {
                   mode does not change.
                 </p>
               </div>
-              <Switch
-                label="FPS"
-                value={prefs.fps}
-                disabled={disabled}
-                options={[
-                  { value: 30, label: "30" },
-                  { value: 60, label: "60" },
-                ]}
-                onChange={(fps) => set({ fps })}
-              />
-              <Switch
-                label="Max bandwidth · Mb/s"
-                value={prefs.bitrateMbps}
-                disabled={disabled}
-                options={[
-                  { value: 10, label: "10" },
-                  { value: 20, label: "20" },
-                  { value: 50, label: "50" },
-                ]}
-                onChange={(bitrateMbps) => set({ bitrateMbps })}
-              />
+              <div>
+                <Switch
+                  label="FPS"
+                  value={prefs.fps}
+                  disabled={disabled}
+                  options={[
+                    { value: 30, label: "30" },
+                    { value: 60, label: "60" },
+                    { value: 90, label: "90" },
+                    { value: 120, label: "120" },
+                    { value: 144, label: "144" },
+                  ]}
+                  onChange={(fps) => set({ fps })}
+                />
+                <p className="mt-2 text-moonlight/70">
+                  Pick at most your monitor’s refresh rate and the host’s;
+                  frames past either are wasted.
+                </p>
+              </div>
+              <div>
+                <Switch
+                  label="Max bandwidth · Mb/s"
+                  value={prefs.bitrateMbps}
+                  disabled={disabled}
+                  options={[
+                    { value: 10, label: "10" },
+                    { value: 20, label: "20" },
+                    { value: 50, label: "50" },
+                    { value: 100, label: "100" },
+                    { value: 150, label: "150" },
+                  ]}
+                  onChange={(bitrateMbps) => set({ bitrateMbps })}
+                />
+                <p className="mt-2 text-moonlight/70">
+                  100+ Mb/s needs a direct Tailscale path; relayed (DERP)
+                  links stutter. Raise it for 120+ fps or 4:4:4.
+                </p>
+              </div>
+              <div>
+                <Switch
+                  label="Colour"
+                  value={prefs.yuv444 ? "444" : "420"}
+                  disabled={disabled}
+                  options={[
+                    { value: "420", label: "Standard" },
+                    { value: "444", label: "4:4:4 sharp text" },
+                  ]}
+                  onChange={(mode) => set({ yuv444: mode === "444" })}
+                />
+                <p className="mt-2 text-moonlight/70">
+                  4:4:4 keeps small text crisp. The host needs an NVIDIA or
+                  Intel encoder; without GPU 4:4:4 decode here, Moonlight warns
+                  and decodes on the CPU.
+                </p>
+              </div>
               <div>
                 <Switch
                   label="Mouse"
