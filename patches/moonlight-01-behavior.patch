@@ -100,13 +100,13 @@ index 574098a6..d58ea945 100644
 -        emit computerFound(computer);
 +    if (!matchComputer(computer) || !isOnline(computer)) {
 +        return;
-     }
++    }
 +    // Cached PCs often store LAN + WAN next to the Tailscale IP Eclipse
 +    // passed. Polling can mark them online on 192.168.x first; the stream
 +    // then uses that address and video UDP never comes back over 100.x.
 +    if (isAddressLiteral(m_ComputerName) && !activeAddressIs(computer, m_ComputerName)) {
 +        return;
-+    }
+     }
 +    m_ComputerManager->stopPollingAsync();
 +    m_TimeoutTimer->stop();
 +    emit computerFound(computer);
@@ -418,7 +418,7 @@ index 4668eec9..e73afdb4 100644
  
 diff --git a/app/streaming/eclipsepopup.cpp b/app/streaming/eclipsepopup.cpp
 new file mode 100644
-index 00000000..311469ba
+index 00000000..a6455970
 --- /dev/null
 +++ b/app/streaming/eclipsepopup.cpp
 @@ -0,0 +1,1240 @@
@@ -921,13 +921,13 @@ index 00000000..311469ba
 +    const int maxPanelW = 760;
 +
 +    TTF_Font* body = openJetBrainsMono(14);
-+    TTF_Font* small = openJetBrainsMono(12);
-+    if (body == nullptr || small == nullptr) {
++    TTF_Font* smallFont = openJetBrainsMono(12);
++    if (body == nullptr || smallFont == nullptr) {
 +        if (body != nullptr) {
 +            TTF_CloseFont(body);
 +        }
-+        if (small != nullptr) {
-+            TTF_CloseFont(small);
++        if (smallFont != nullptr) {
++            TTF_CloseFont(smallFont);
 +        }
 +        return nullptr;
 +    }
@@ -952,10 +952,10 @@ index 00000000..311469ba
 +            item.left = renderGlyph(body, row.left, frame);
 +            break;
 +        case CardRow::Section:
-+            item.left = renderGlyph(small, row.left, kMuted);
++            item.left = renderGlyph(smallFont, row.left, kMuted);
 +            break;
 +        case CardRow::Note:
-+            item.left = renderGlyph(small, row.left, kMuted);
++            item.left = renderGlyph(smallFont, row.left, kMuted);
 +            break;
 +        case CardRow::Pair:
 +            item.left = renderGlyph(body, row.left, row.leftColor);
@@ -1013,7 +1013,7 @@ index 00000000..311469ba
 +        SDL_FreeSurface(item.right);
 +    }
 +    TTF_CloseFont(body);
-+    TTF_CloseFont(small);
++    TTF_CloseFont(smallFont);
 +    return card != nullptr ? toArgb8888(card) : nullptr;
 +}
 +
@@ -1870,7 +1870,7 @@ index 00000000..14f557d0
 +                                const QString& activeName);
 diff --git a/app/streaming/eclipsestreamui.cpp b/app/streaming/eclipsestreamui.cpp
 new file mode 100644
-index 00000000..cda09ca7
+index 00000000..4f21a628
 --- /dev/null
 +++ b/app/streaming/eclipsestreamui.cpp
 @@ -0,0 +1,775 @@
@@ -2198,7 +2198,7 @@ index 00000000..cda09ca7
 +
 +    // Menu layout.
 +    TTF_Font* body = nullptr;
-+    TTF_Font* small = nullptr;
++    TTF_Font* smallFont = nullptr;
 +    TTF_Font* title = nullptr;
 +    QList<SDL_Surface*> owned;
 +    struct Row {
@@ -2228,16 +2228,16 @@ index 00000000..cda09ca7
 +        g_ui.entries = buildEntries();
 +        g_ui.stateKey = stateKeyFor(g_ui.entries);
 +        body = openFont("mono", px(14));
-+        small = openFont("mono", px(12));
++        smallFont = openFont("mono", px(12));
 +        title = openFont("title", px(20));
-+        if (body == nullptr || small == nullptr) {
++        if (body == nullptr || smallFont == nullptr) {
 +            g_ui.menuOpen = false;
 +        }
 +    }
 +
 +    if (g_ui.menuOpen) {
 +        titleGlyph = glyph(title ? title : body, QStringLiteral("Eclipse"), kGold);
-+        footGlyph = glyph(small, QStringLiteral("Drag the logo to move it"), kMuted);
++        footGlyph = glyph(smallFont, QStringLiteral("Drag the logo to move it"), kMuted);
 +        int y = padY;
 +        int leftW = 0;
 +        int rightW = 0;
@@ -2249,7 +2249,7 @@ index 00000000..cda09ca7
 +            Row r{i, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0};
 +            if (e.kind == MenuEntry::Section) {
 +                y += px(i == 0 ? 10 : 14);
-+                r.left = glyph(small, e.text, kMuted);
++                r.left = glyph(smallFont, e.text, kMuted);
 +                r.y = y;
 +                r.h = r.left ? r.left->h : px(14);
 +                y += r.h + px(4);
@@ -2258,10 +2258,10 @@ index 00000000..cda09ca7
 +                const QString label = e.item.label;
 +                r.left = glyph(body, label, kLavender);
 +                r.state = glyph(body, e.item.state, e.item.checked ? kGold : kLavender);
-+                r.key = glyph(small, e.item.key, kMuted);
++                r.key = glyph(smallFont, e.item.key, kMuted);
 +                r.leftHover = glyph(body, label, kNavy);
 +                r.stateHover = glyph(body, e.item.state, kNavy);
-+                r.keyHover = glyph(small, e.item.key, kNavy);
++                r.keyHover = glyph(smallFont, e.item.key, kNavy);
 +                const int lh = qMax(r.left ? r.left->h : 0, r.state ? r.state->h : 0);
 +                r.y = y;
 +                r.h = lh + rowPadY * 2;
@@ -2373,8 +2373,8 @@ index 00000000..cda09ca7
 +    if (body) {
 +        TTF_CloseFont(body);
 +    }
-+    if (small) {
-+        TTF_CloseFont(small);
++    if (smallFont) {
++        TTF_CloseFont(smallFont);
 +    }
 +    if (title) {
 +        TTF_CloseFont(title);

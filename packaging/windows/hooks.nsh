@@ -1,7 +1,15 @@
 ; Eclipse NSIS hooks. Firewall + SunshineService (boot-time host).
 ; The running Eclipse GUI does not require Administrator.
 
+; Upgrades: the running host locks tools\sunshinesvc.exe and the sidecars, so
+; stop it before files are copied. POSTINSTALL recreates and restarts it.
 !macro NSIS_HOOK_PREINSTALL
+  nsExec::ExecToLog 'net stop SunshineService'
+  Pop $0
+  nsExec::ExecToLog 'taskkill /F /T /IM sunshinesvc.exe'
+  Pop $0
+  nsExec::ExecToLog 'powershell.exe -NoProfile -Command "Get-Process sunshine,moonlight -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like \"$INSTDIR\*\" } | Stop-Process -Force"'
+  Pop $0
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
